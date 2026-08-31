@@ -11,7 +11,7 @@ COMPUTE_TYPE = "int8"
 
 
 def load_model(model_size: str = MODEL_SIZE, device: str = DEVICE, compute_type: str = COMPUTE_TYPE) -> WhisperModel:
-    try:
+    try: 
         return WhisperModel(model_size, device=device, compute_type=compute_type)
     except Exception as error:
         raise RuntimeError(f"Failed to load Whisper model '{model_size}': {error}")

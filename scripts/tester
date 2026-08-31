@@ -1,0 +1,7 @@
+import sounddevice as sd
+
+print(sd.query_devices())
+
+y = 2+1
+
+print(f"{y}")

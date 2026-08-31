@@ -1,0 +1,23 @@
+{
+  "_meta": "Starter/example glossary only — not derived from real Whisper error logs on the Hiligaynon classroom corpus yet. Grow this from actual transcription errors observed during the September fine-tuning data pass (see CLAUDE.md). Keys are lowercase; matching is case-insensitive and case-preserving on replacement.",
+  "terms": {
+    "hiligaynon": "Hiligaynon",
+    "ilonggo": "Ilonggo",
+    "iloilo": "Iloilo",
+    "recitation": "recitation",
+    "attendance": "attendance",
+    "assignment": "assignment",
+    "asaynment": "assignment",
+    "pasahan": "pasahan",
+    "pa sahan": "pasahan",
+    "gina himo": "ginahimo",
+    "gina buhat": "ginabuhat",
+    "ma am": "ma'am",
+    "ma'm": "ma'am",
+    "sir ko": "Sir ko",
+    "amo bala": "amo bala",
+    "amo ba": "amo bala",
+    "indi gid": "indi gid",
+    "sang una": "sang una"
+  }
+}

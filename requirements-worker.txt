@@ -1,0 +1,19 @@
+# The worker tier's dependency footprint — deployment/Dockerfile.worker installs
+# ONLY this file. This is where every ML library actually lives; the API tier
+# (requirements-api.txt) doesn't need any of it.
+
+celery
+redis
+sqlalchemy
+psycopg[binary]
+networkx
+
+soundfile
+numpy
+faster-whisper
+torch
+torchaudio
+silero-vad
+pyannote.audio
+pyrnnoise        # optional: RNNoise denoising, may not build cleanly everywhere (enable_denoise=False skips it)
+speechbrain       # optional: teacher verification (ECAPA-TDNN), enable_teacher_verification=False skips it

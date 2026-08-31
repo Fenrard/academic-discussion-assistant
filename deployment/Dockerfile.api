@@ -1,0 +1,35 @@
+# Scaitale API tier — FastAPI only, no ML inference (see backend/main.py's docstring).
+# Deliberately does NOT install ffmpeg or requirements-worker.txt's ML stack: this
+# image never runs audio_service, only enqueues Celery tasks for the worker image
+# (Dockerfile.worker) to pick up.
+#
+# Build from the repo root: docker build -f deployment/Dockerfile.api -t scaitale-api .
+
+FROM python:3.11-slim AS builder
+
+WORKDIR /build
+COPY requirements-api.txt .
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements-api.txt
+
+
+FROM python:3.11-slim
+
+RUN useradd --create-home --uid 1000 scaitale
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+COPY backend/ ./backend/
+RUN chown -R scaitale:scaitale /app
+
+USER scaitale
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)" || exit 1
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
