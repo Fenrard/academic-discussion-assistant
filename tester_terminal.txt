@@ -1,0 +1,11 @@
+record_test_audio.py tester
+python record_test_audio.py
+
+preprocess_audio.py tester
+python preprocess_audio.py ../recordings/classroom.wav
+
+transcribe_audio.py tester
+python transcribe_audio.py ../recordings/lecture_preprocessed.wav
+
+process_pipeline.py tester
+c:\Users\natha\OneDrive\Documents\Thesis\academic-discussion-assistant\.venv\Scripts\python.exe C:\Users\natha\OneDrive\Documents\Thesis\academic-discussion-assistant\scripts\process_pipeline.py C:\Users\natha\OneDrive\Documents\Thesis\academic-discussion-assistant\recordings\lecture_preprocessed.wav

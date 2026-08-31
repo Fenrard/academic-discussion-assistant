@@ -1,0 +1,95 @@
+# Local/prod-like orchestration: postgres + redis + api + worker.
+#
+# NOT verified by running it in this dev sandbox (no Docker installed here) — written
+# to spec and covered instead by .github/workflows/ci.yml's postgres+redis service
+# containers. Run `docker compose config` to at least validate the YAML once Docker is
+# available, before `docker compose up`.
+#
+# Usage (from the repo root):
+#   cp deployment/.env.example deployment/.env   # fill in JWT_SECRET_KEY, HF_TOKEN
+#   docker compose -f deployment/docker-compose.yml --env-file deployment/.env up --build
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: scaitale
+      POSTGRES_USER: scaitale
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scaitale_dev_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scaitale"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.api
+    command: ["alembic", "upgrade", "head"]
+    environment: &common_env
+      DATABASE_URL: postgresql+psycopg://scaitale:${POSTGRES_PASSWORD:-scaitale_dev_password}@postgres:5432/scaitale
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be set — see deployment/.env.example}
+      HF_TOKEN: ${HF_TOKEN:-}
+      ENVIRONMENT: production
+      SENTRY_DSN: ${SENTRY_DSN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.api
+    ports:
+      - "8000:8000"
+    environment: *common_env
+    volumes:
+      - shared-tmp:/tmp/scaitale
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.worker
+    environment: *common_env
+    volumes:
+      - shared-tmp:/tmp/scaitale
+      - worker-models:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # Scale independently of the API tier as load grows:
+    #   docker compose -f deployment/docker-compose.yml up --scale worker=3
+
+volumes:
+  postgres-data:
+  shared-tmp:
+  worker-models:

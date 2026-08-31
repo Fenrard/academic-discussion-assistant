@@ -1,0 +1,68 @@
+# Intentionally unpinned while the environment is still in flux (see README).
+# Install with: pip install -r requirements.txt
+#
+# Full, single-machine union of requirements-api.txt + requirements-worker.txt, for
+# local dev (one process running everything) and CI. A real deployment installs those
+# two files into separate images instead (deployment/Dockerfile.api,
+# deployment/Dockerfile.worker) — the API tier never needs torch/faster-whisper/
+# pyannote/speechbrain at all; see requirements-api.txt's header comment.
+
+# --- Audio I/O / recording ---
+sounddevice
+soundfile
+numpy
+
+# --- Speech pipeline (worker tier only) ---
+faster-whisper
+torch
+torchaudio
+silero-vad
+pyannote.audio
+pyrnnoise        # optional: RNNoise denoising, may not build cleanly on Windows (enable_denoise=False skips it)
+speechbrain       # optional: teacher verification (ECAPA-TDNN), enable_teacher_verification=False skips it
+
+# --- Backend API ---
+fastapi
+uvicorn[standard]
+websockets
+python-multipart
+sqlalchemy
+psycopg[binary]
+alembic
+
+# --- Auth ---
+pyjwt
+bcrypt            # NOT passlib — passlib 1.7.4 (unmaintained) breaks against bcrypt>=4.1's
+                   # changed version metadata; see backend/core/security.py's docstring.
+email-validator    # required for pydantic's EmailStr
+
+# --- Async inference tier (worker pool + API<->worker fan-out) ---
+celery
+redis
+
+# --- Observability ---
+prometheus-fastapi-instrumentator
+sentry-sdk
+
+# --- Rate limiting / abuse controls ---
+slowapi
+
+# --- Keyword extraction / minutes ---
+networkx
+
+# --- Evaluation ---
+scipy
+pandas
+matplotlib
+psutil
+
+# --- Fine-tuning (LoRA/PEFT on Whisper small, per CLAUDE.md — Colab GPU) ---
+transformers
+datasets
+peft
+accelerate
+# ctranslate2 is already pulled in by faster-whisper; ct2-transformers-converter
+# (used by ai/finetuning/convert_to_faster_whisper.py) ships inside that package.
+
+# --- Testing ---
+pytest

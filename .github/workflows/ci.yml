@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: scaitale_ci
+          POSTGRES_USER: scaitale
+          POSTGRES_PASSWORD: scaitale_ci_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U scaitale"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://scaitale:scaitale_ci_password@localhost:5432/scaitale_ci
+      REDIS_URL: redis://localhost:6379/0
+      CELERY_BROKER_URL: redis://localhost:6379/0
+      CELERY_RESULT_BACKEND: redis://localhost:6379/0
+      JWT_SECRET_KEY: ci-only-secret-not-for-production
+      ENVIRONMENT: development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # This job runs the full pytest suite against real Postgres + Redis — the one
+      # thing the dev sandbox that built this couldn't verify locally (no Docker
+      # there). A green run here is the actual proof the Postgres/Alembic path works,
+      # not just "written to spec."
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # requirements.txt is the full union of requirements-api.txt + requirements-worker.txt
+          # (see its header comment) — simplest single install for a CI job that runs the whole
+          # test suite, including the worker-tier tests in tests/test_tasks.py.
+          pip install -r requirements.txt
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Run Alembic migrations against Postgres
+        run: alembic upgrade head
+
+      - name: Run test suite
+        run: pytest tests/ -v

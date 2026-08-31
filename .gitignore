@@ -14,8 +14,8 @@ recordings/
 *.mp3
 *.flac
 
-# Downloaded AI models
-models/
+# Downloaded AI models (root-level models/ only — NOT backend/models/, which is source code)
+/models/
 *.pt
 *.pth
 *.ckpt
@@ -28,3 +28,6 @@ models/
 
 # VS Code settings
 .vscode/
+
+# Android Studio project state (per CLAUDE.md)
+android/.idea/

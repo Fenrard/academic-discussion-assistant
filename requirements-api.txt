@@ -1,0 +1,32 @@
+# The API tier's actual dependency footprint — deployment/Dockerfile.api installs
+# ONLY this file. No torch, no faster-whisper, no pyannote, no speechbrain: the API
+# process never runs inference (see backend/main.py's docstring and
+# backend/worker/tasks.py's — tasks are enqueued via imported task *objects*'
+# .delay(), but each task's heavy imports are lazy, inside its function body, so
+# importing backend.worker.tasks here to get those objects stays cheap). Verified via
+# `import backend.api.transcribe; import backend.api.teacher` loading none of
+# torch/faster_whisper/pyannote/silero_vad/speechbrain/pyrnnoise.
+
+fastapi
+uvicorn[standard]
+websockets
+python-multipart
+sqlalchemy
+psycopg[binary]
+alembic
+
+pyjwt
+bcrypt
+email-validator
+
+celery
+redis
+
+prometheus-fastapi-instrumentator
+sentry-sdk
+slowapi
+
+# session_service.finalize_session() (called directly from the WS handler, not just
+# from a worker task) runs TextRank keyword extraction — the one otherwise-worker-side
+# service the API process genuinely needs.
+networkx

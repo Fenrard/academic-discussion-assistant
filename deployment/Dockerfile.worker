@@ -1,0 +1,43 @@
+# Scaitale worker tier — the Celery worker that actually runs the pipeline
+# (RNNoise -> Silero VAD -> Faster-Whisper -> pyannote -> SpeechBrain). Needs ffmpeg
+# (CLAUDE.md: "FFmpeg preprocessing is ALWAYS ON") and the full ML stack — this is the
+# heavy image; deployment/Dockerfile.api stays lean by NOT installing any of this.
+#
+# Build from the repo root: docker build -f deployment/Dockerfile.worker -t scaitale-worker .
+
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY requirements-worker.txt .
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
+    && /opt/venv/bin/pip install --no-cache-dir -r requirements-worker.txt
+
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN useradd --create-home --uid 1000 scaitale
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+COPY backend/ ./backend/
+RUN mkdir -p /app/models && chown -R scaitale:scaitale /app
+
+USER scaitale
+# Models (Whisper, pyannote, SpeechBrain) get downloaded into here on first run —
+# mount a volume at /app/models in docker-compose.yml so re-creating the container
+# doesn't re-download multi-GB weights every time.
+VOLUME ["/app/models"]
+
+CMD ["celery", "-A", "backend.worker.celery_app", "worker", "--loglevel=info", "--concurrency=2"]

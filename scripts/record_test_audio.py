@@ -6,7 +6,7 @@ import soundfile as sf
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
-DURATION_SECONDS = 3
+DURATION_SECONDS = 5
 OUTPUT_FILENAME = "classroom.wav"
 
 
