@@ -47,7 +47,16 @@ def test_create_and_decode_access_token_round_trip():
 
 def test_decode_access_token_rejects_tampered_token():
     token = create_access_token(subject="user-123")
-    tampered = token[:-1] + ("A" if token[-1] != "A" else "B")
+    # Flip a character in the middle of the token (the payload segment), not the last
+    # character of the whole token. A JWT's HMAC signature is 32 bytes, which base64url
+    # -encodes to a final character carrying only 4 real bits (the other 2 are padding
+    # zeros) — 4 of the 64 base64url characters decode to those same 4 bits, so tampering
+    # with specifically the *last* character has a real ~1-in-4 chance of producing a
+    # byte-for-byte identical signature (this was caught as a genuine intermittent
+    # failure, not a hypothetical: the token's actual last character happened to be one
+    # of those 4-way-equivalent ones). A middle character has no such equivalence class.
+    middle = len(token) // 2
+    tampered = token[:middle] + ("A" if token[middle] != "A" else "B") + token[middle + 1:]
     with pytest.raises(jwt.InvalidTokenError):
         decode_access_token(tampered)
 

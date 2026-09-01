@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session as DbSession
 from backend.models.session import SessionRecord
 from backend.models.teacher import TeacherEnrollment
 from backend.schemas.pipeline import PipelineOptions
-from backend.services.keyword_service import extract_keywords
+from backend.services.keyword_service import build_weighted_text, extract_keywords
 from backend.services.minutes_service import generate_minutes
 
 
@@ -103,7 +103,10 @@ def finalize_session(db: DbSession, session: SessionRecord) -> SessionRecord:
     contiguous prefix stopped early) — just yields empty/partial
     keywords/minutes rather than raising.
     """
-    keywords = extract_keywords(session.transcript_text)
+    # Weighted, not the raw transcript_text — teacher speech counts more toward
+    # which keywords surface, when teacher verification was enabled. See
+    # build_weighted_text()'s docstring for why this is a no-op otherwise.
+    keywords = extract_keywords(build_weighted_text(session.transcript_segments))
     session.keywords = keywords
 
     if session.transcript_segments:

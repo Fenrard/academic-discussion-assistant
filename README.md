@@ -177,7 +177,7 @@ Then open [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) for interacti
 - `WS /ws/transcribe?token=<jwt>` — send a JSON `{"type": "start", "consent_confirmed": true, "options": {...}}` frame, then binary WAV-chunk frames, then `{"type": "end"}`. See `scripts/ws_smoke_test.py` (WS-only) or `scripts/v2_smoke_test.py` (full walkthrough: register, both transcribe paths, enrollment, rate limiting, `/metrics`) for runnable examples against `recordings/lecture_preprocessed.wav`.
 - `GET /sessions`, `GET /sessions/{id}`, `DELETE /sessions/{id}` — session library + transcript + purge.
 - `POST /teachers/enroll` (also async — poll `GET /teachers/{id}` for `status: "ready"`), `GET /teachers`, `GET /teachers/{id}`, `DELETE /teachers/{id}`.
-- `GET /sessions/{id}/minutes`, `GET /sessions/{id}/minutes/export?format=markdown` — structured minutes + download.
+- `GET /sessions/{id}/minutes`, `GET /sessions/{id}/minutes/export?format=markdown` — structured minutes (topics, key points, definitions, action items, participants, `teacher_speech_ratio`/`teacher_speakers`) + download.
 - `GET /metrics` — Prometheus metrics (no auth).
 
 Data lives in SQLite by default (`backend/database/scaitale.db`, gitignored) — set `DATABASE_URL` for Postgres (see section 11). Pipeline toggles (`enable_denoise`, `enable_vad`, `enable_diarization`, `enable_teacher_verification`, `num_speakers`, `beam_size`) are sent as concrete values on every request — the backend is stateless and doesn't know about Flutter's Fast/Balanced/Accurate presets.
@@ -194,9 +194,9 @@ pytest tests/
 - **`backend/data/glossary.json` is a starter/example list**, not derived from real Whisper error logs — grow it from the September corpus pass.
 - **Teacher-verification threshold is a reasonable default, not calibrated** against real enrolled-vs-unenrolled data yet — `evaluation/teacher_id.py` scores it once you have labeled data.
 - **Per-chunk diarization still has no cross-chunk speaker continuity** over WebSocket — same caveat as `simulate_streaming.py`.
-- **Minutes generation is a documented heuristic** (time-gap topic grouping + trigger-phrase action items), not NLP — expect misses on real classroom audio.
+- **Minutes generation is a documented heuristic** (time-gap topic grouping, teacher-prioritized key points/topic labels, trilingual pattern-matched definitions + action items), not NLP — expect misses on real classroom audio; `definitions`' precision/recall is unmeasured until real data exists to score it against.
 - **`POST /transcribe`'s whole-file task assumes the API and worker share a filesystem** (a volume in `deployment/docker-compose.yml`) — fine co-located, not yet fixed for true multi-host (needs object storage).
-- **Docker/Postgres/Redis aren't installed in the environment this was built in** — `deployment/` and the Alembic migration are written to spec and covered by CI, not run-verified locally; see section 11.
+- **Docker images themselves aren't built/run** — Postgres 17 + a Redis-compatible server were installed natively and verified directly (migration, a real separate worker process, CI green on `main`); the Dockerfiles/compose are written to spec but not yet run as actual containers. See section 11.
 
 ---
 
