@@ -45,6 +45,31 @@ def _tokenize(text: str) -> list[str]:
     return [w.lower() for w in _WORD_PATTERN.findall(text)]
 
 
+def build_weighted_text(segments: list[dict], teacher_weight: float = 2.0) -> str:
+    """
+    Concatenates segment text for extract_keywords(), repeating
+    teacher-labeled segments `teacher_weight` times over so instructional
+    speech dominates the co-occurrence graph instead of getting drowned out
+    by side conversation of the same length — the "prioritize instructional
+    speech" half of teacher voice prioritization applied to keyword
+    extraction (the identification half lives in
+    teacher_verification_service.py). Segments with no "is_teacher" key
+    (enable_teacher_verification was off for the session) are all weighted
+    equally at 1x, so this is a no-op — identical output to just joining
+    every segment's text once — when the feature isn't in use.
+    """
+    repeat = max(1, round(teacher_weight))
+    parts: list[str] = []
+
+    for segment in segments:
+        text = segment.get("text", "").strip()
+        if not text:
+            continue
+        parts.extend([text] * (repeat if segment.get("is_teacher") else 1))
+
+    return " ".join(parts)
+
+
 def extract_keywords(text: str, top_n: int = 10) -> list[str]:
     """
     Returns up to `top_n` keywords/keyphrases ranked by TextRank score,

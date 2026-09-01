@@ -57,6 +57,14 @@ def _render_minutes(title: str | None, minutes: dict, as_markdown: bool) -> str:
     lines.append(f"Generated: {minutes['generated_at']}")
     lines.append(f"Duration: {minutes['duration_seconds']}s")
     lines.append(f"Participants: {', '.join(minutes['participants']) or 'Unknown'}")
+
+    # .get() throughout below: sessions finalized before teacher_speech_ratio/
+    # teacher_speakers/definitions existed won't have these keys.
+    teacher_ratio = minutes.get("teacher_speech_ratio")
+    if teacher_ratio:
+        teacher_speakers = ", ".join(minutes.get("teacher_speakers", [])) or "unidentified"
+        lines.append(f"Teacher speech: {round(teacher_ratio * 100, 1)}% ({teacher_speakers})")
+
     lines.append(f"Keywords: {', '.join(minutes['keywords']) or 'None'}")
     lines.append("")
 
@@ -66,6 +74,16 @@ def _render_minutes(title: str | None, minutes: dict, as_markdown: bool) -> str:
         for point in topic["key_points"]:
             lines.append(f"{bullet} {point}")
         lines.append("")
+
+    lines.append(f"{heading}# Definitions".strip() if as_markdown else "Definitions:")
+    definitions = minutes.get("definitions", [])
+    if definitions:
+        for entry in definitions:
+            term = f"**{entry['term']}**" if as_markdown else entry["term"]
+            lines.append(f"{bullet} {term} — {entry['definition']}")
+    else:
+        lines.append(f"{bullet} None detected")
+    lines.append("")
 
     lines.append(f"{heading}# Action Items".strip() if as_markdown else "Action Items:")
     if minutes["action_items"]:
