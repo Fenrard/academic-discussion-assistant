@@ -265,6 +265,10 @@ Android → FastAPI → Audio Service → RNNoise → Silero → Teacher Verific
 - **Virtual environment:** `.venv` in project root — activate before every session
 - **FFmpeg:** installed at `C:\ffmpeg\bin`, on PATH — `ffmpeg` and `ffprobe` both available
 - **HF_TOKEN:** required for pyannote (Hugging Face gated model) — set per session with `$env:HF_TOKEN = "your_token"` or permanently via `setx`
+- **JWT_SECRET_KEY:** required to run the API (auth can't sign tokens without it) — any value works for dev (`$env:JWT_SECRET_KEY = "dev-only-secret"`); generate a real one with `python -c "import secrets; print(secrets.token_hex(32))"` for anything beyond local dev. In `ENVIRONMENT=production` the API refuses to start without it.
+- **PostgreSQL 17:** installed natively (Windows service `postgresql-x64-17`, auto-starts). Dev database: `scaitale` / user `scaitale` / password `scaitale_dev_password` → `$env:DATABASE_URL = "postgresql+psycopg://scaitale:scaitale_dev_password@localhost:5432/scaitale"`. Optional — SQLite is the default when `DATABASE_URL` is unset, and `pytest` needs no infra at all.
+- **Memurai (Redis-compatible):** installed natively (Windows service `Memurai`, auto-starts) at `redis://localhost:6379/0` — set `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND`/`REDIS_URL` to it to run a real separate worker (`celery -A backend.worker.celery_app worker --pool=solo` — `--pool=solo` is required on Windows, prefork needs fork()). Also optional — no broker configured means Celery's eager mode runs tasks inline in the API process.
+- **Manual smoke tests:** `scripts/v2_smoke_test.py` (full REST+WS walkthrough: register → login → async transcribe+poll → teacher enrollment → WS streaming → /metrics) and `scripts/ws_smoke_test.py` (WS-only) — both expect a server already running on port 8000; both end in an explicit pass/fail. Dev utilities like the six scripts, not app code.
 - **Python standard:** no argparse or CLI concerns inside importable functions — CLI entry points are thin wrappers only
 
 ---
@@ -464,4 +468,4 @@ Remaining items (5–7, 10, 12) are Flutter/manual-recording work, next up with 
 
 ---
 
-*Last updated: August 2026. Maintained by Nathan (PM) + Claude (implementer).*
+*Last updated: September 2026. Maintained by Nathan (PM) + Claude (implementer).*
