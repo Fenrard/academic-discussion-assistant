@@ -449,22 +449,18 @@ Triggered by an architecture review that found: `async def` routes calling CPU-b
 
 ---
 
-## Current Build Priority (14-Day Sprint)
+## Current Build Priority — superseded, see below
 
-1. ~~`backend/services/audio_service.py` — wraps preprocess + transcribe~~ **done**
-2. ~~`/transcribe` POST/WebSocket endpoint~~ **done**
-3. ~~Silero VAD integration into audio service~~ **done**
-4. ~~SpeechBrain ECAPA enrollment + verification service~~ **done**
-5. Flutter audio recording → WebSocket → backend round trip
-6. Live subtitle display in Flutter
-7. Teacher enrollment screen
-8. ~~Glossary post-processing~~ **done**
-9. ~~TextRank + rule-based minutes generation~~ **done**
-10. Minutes screen + export in Flutter
-11. ~~Evaluation scripts (`wer.py`, `latency.py`)~~ **done**
-12. End-to-end demo recording
+The original 14-day sprint list (items 1–4, 8, 9, 11) is done — see "Backend (Built)" and the four "Resolved this pass" rounds above. **All backend/code work is done as of round 4.** Everything genuinely still open from here is either Nathan's own work or blocked on real-world data/people, not more backend code:
 
-Remaining items (5–7, 10, 12) are Flutter/manual-recording work, next up with Nathan building the screens against the endpoints above.
+- **Flutter** (all 6 screens — home/library, teacher enrollment, live recording+subtitles, transcript view, minutes view+export, settings) — Nathan's, not started. Every endpoint it needs is built and tested; `scripts/v2_smoke_test.py` shows the exact request/response shapes.
+- **Ethics/consent clearance** — Nathan's, blocks all real classroom recording.
+- **Real classroom data collection** (Nathan + Andrei + Dan Joseph) — blocks everything below.
+- **Fine-tuning run** — `ai/finetuning/` is a tested, ready scaffold with zero trained checkpoints; needs the corpus above.
+- **Real evaluation numbers** (WER, teacher-ID, latency for the manuscript) — `evaluation/` scripts are built and tested; zero real results exist, needs real reference transcripts + labeled speaker data.
+- **Usability study (SUS)** — `evaluation/sus.py` is scoring math only; needs the finished Flutter app + real respondents. "Perceived usefulness"/"perceived comprehension support" also have no instrument built yet — needs its own survey items beyond generic SUS.
+- **Docker containers actually built and run** — Dockerfiles/compose written and CI-exercises the same infra shape, but no container from these specific files has been built; optional unless deploying past the thesis.
+- **Object storage** for `POST /transcribe`'s whole-file path across separate machines — only matters for a true multi-host deployment.
 
 ---
 
