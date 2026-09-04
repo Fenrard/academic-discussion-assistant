@@ -1,7 +1,9 @@
 """
 Teacher identification metrics (CLAUDE.md's Evaluation Metrics list:
 "Teacher identification: precision/recall/F1 AND false-accept/
-false-reject rate on enrolled vs unenrolled speakers").
+false-reject rate on enrolled vs unenrolled speakers" — plus overall
+accuracy, the metric the thesis manuscript's Table 1 names separately
+from precision/recall/F1; see docs/paper-vs-implementation.md).
 
 Works on plain (predicted_is_teacher, actual_is_teacher) label pairs,
 same shape backend.services.teacher_verification_service.verify_segment()
@@ -66,6 +68,10 @@ def compute_teacher_id_metrics(predictions: list[bool], actuals: list[bool]) -> 
     precision = _safe_divide(counts.true_positive, counts.true_positive + counts.false_positive)
     recall = _safe_divide(counts.true_positive, counts.true_positive + counts.false_negative)
     f1 = _safe_divide(2 * precision * recall, precision + recall)
+    # Correct classifications (teacher and non-teacher alike) over all segments — the
+    # paper's Table 1 lists this as its own metric, distinct from precision/recall/F1,
+    # so it's reported here rather than left for the caller to derive from `counts`.
+    accuracy = _safe_divide(counts.true_positive + counts.true_negative, len(predictions))
 
     # FAR is measured against the unenrolled population, FRR against the enrolled population.
     unenrolled_count = counts.false_positive + counts.true_negative
@@ -75,6 +81,7 @@ def compute_teacher_id_metrics(predictions: list[bool], actuals: list[bool]) -> 
 
     return {
         "counts": vars(counts),
+        "accuracy": accuracy,
         "precision": precision,
         "recall": recall,
         "f1": f1,

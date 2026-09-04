@@ -10,13 +10,23 @@
 
 **Full thesis title:** *"Development and Evaluation of a Noise-Aware Code-Switching Multilingual Speech Recognition and Automated Summarization System for Hiligaynon Classroom Discourse"*
 
-⚠️ **Title inconsistency, flagged not resolved:** this title doesn't match README.md's header (also doesn't match this section either), and neither matches the phrasing in the Thesis Objectives section below (given verbatim by Nathan, presumably straight from the actual proposal/manuscript). Three different phrasings across this repo's own docs — pick the one that's actually on file with the panel/registrar and make the other two match it; not a call to make without that information.
+**Title, confirmed:** checked directly against the manuscript's own title page (`THESIS_ Development and Evaluation of a Noise-Aware Code-Switching Multilingual Speech Recognition and Automated Summarization System for Hiligaynon Classroom Discourse (4).docx`, found at repo root) — the line above is the real, current title, character-for-character. README.md's old "Talakayan"/"Academic Discussion Assistant Transcription Application" header was the outdated one and has been corrected to match. See `docs/paper-vs-implementation.md` for the full read of the manuscript's Chapter 1 and Chapter 3 against this codebase.
 
 **Repo name:** `academic-discussion-assistant`
 
 ---
 
 ## Thesis Objectives (verbatim, as given — the actual source to write the manuscript against)
+
+**General Research Question:** How can a prototype teacher voice-prioritized multilingual classroom transcription and structured draft minute generation system help improve the clarity, accessibility, and usability of information presented during multilingual classroom discussions?
+
+**Specific Research Questions:**
+1. How effectively can the proposed system process noisy multilingual classroom audio?
+2. How accurately can the system identify and prioritize teacher speech?
+3. How accurately can the system transcribe Hiligaynon, Filipino, and English code-switched classroom discourse?
+4. How effectively can the system generate structured draft classroom minutes from transcribed speech?
+5. How does the system perform in terms of Word Error Rate, Character Error Rate, teacher identification accuracy, and latency?
+6. How do students and teachers evaluate the system in terms of usability, perceived usefulness, and perceived comprehension support?
 
 **General Objective:** The study aims to design and develop a prototype teacher voice-prioritized multilingual classroom transcription and structured draft minute generation system that supports the clarity, accessibility, and usability of instructional content in multilingual classroom environments.
 
@@ -75,7 +85,7 @@ Objectives 2 and 4 were the two gaps where the code didn't yet match what this l
 
 ## Pipeline Order (Locked)
 
-**Corrected against the actual built code** (`backend/services/audio_service.py: run_pipeline()`) — the order originally planned here had SpeechBrain and pyannote running *before* Faster-Whisper, which turned out not to be implementable as literally stated: teacher verification (as built) slices audio per *Whisper segment* to extract each embedding, and diarization's speaker-label merge (`merge_transcript_with_speakers()`) attaches labels onto Whisper's segments — both structurally need those segments to already exist. The real, tested, working order:
+**Corrected against the actual built code** (`backend/services/audio_service.py: run_pipeline()`) — the order originally planned here had SpeechBrain and pyannote running *before* Faster-Whisper, which turned out not to be implementable as literally stated: teacher verification (as built) slices audio per *Whisper segment* to extract each embedding, and diarization's speaker-label merge (`merge_transcript_with_speakers()`) attaches labels onto Whisper's segments — both structurally need those segments to already exist. The manuscript's own Pseudocode, Level 1 DFD narrative, and Integration Testing sequence (Chapter 3) all still describe teacher-ID running on raw VAD chunks *before* transcription — that's a real, consistent discrepancy against this order, not just this file's own stale draft; see `docs/paper-vs-implementation.md` for the reasoning on why this build's order was kept instead. The real, tested, working order:
 
 ```
 Flutter (WebSocket chunks)
@@ -339,7 +349,7 @@ From `process_pipeline.py` CLI flags (for reference):
 ---
 
 ### RNNoise — actual implementation
-- Uses `pyrnnoise` library, **NOT** FFmpeg `arnndn` filter
+- Uses `pyrnnoise` library, **NOT** FFmpeg `arnndn` filter — this is a deliberate deviation from the manuscript's own Software Stack section, which describes RNNoise "applied through FFmpeg's arnndn filter." See `docs/paper-vs-implementation.md` for why `pyrnnoise` was kept over `arnndn` and what to change in the manuscript text.
 - Requires a 48kHz round-trip: upsample (ffmpeg) → `RNNoise.denoise_wav()` → downsample back to 16kHz (ffmpeg)
 - `RNNOISE_SAMPLE_RATE = 48000`, `SAMPLE_RATE = 16000`
 - Two temp files created (`_48k.wav`, `_48k_denoised.wav`) and cleaned up after

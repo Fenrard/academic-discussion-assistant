@@ -1,8 +1,8 @@
 # Talakayan (Scaitale)
 
-> **Noise-Aware Voice Recognition with Multilingual Code-Switching for Filipino, English, and Hiligaynon: A Near Real-Time Academic Discussion Assistant Transcription Application**
+> **Development and Evaluation of a Noise-Aware Code-Switching Multilingual Speech Recognition and Automated Summarization System for Hiligaynon Classroom Discourse**
 >
-> ⚠️ **Title check needed:** this wording doesn't match CLAUDE.md's "Full thesis title" line, which doesn't match the General/Specific Objectives text as given either — three different phrasings across this project's own docs, most likely from title revisions over time. Confirm which is the current, actual submitted title and make the other(s) match it; "Filipino" not "Tagalog" is the one correction made here unconditionally, per CLAUDE.md's own locked Language Scope rule further down this repo's docs.
+> Confirmed against the actual manuscript title page (`THESIS_ Development and Evaluation of a Noise-Aware Code-Switching Multilingual Speech Recognition and Automated Summarization System for Hiligaynon Classroom Discourse (4).docx`) — this is the real title, matching CLAUDE.md's "Full thesis title" line exactly. The previous version of this line here said "Tagalog" instead of "Filipino" and used older, superseded wording; both are now fixed. See `docs/paper-vs-implementation.md` for the full comparison against the manuscript's Chapter 1 and Chapter 3.
 
 An Android-first (Flutter) hybrid AI system for near real-time, multilingual classroom transcription, built as an undergraduate Computer Science thesis. A FastAPI backend performs all AI inference — noise suppression, voice activity detection, teacher verification, speaker diarization, and transcription — while the mobile client stays lightweight.
 

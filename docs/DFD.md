@@ -7,6 +7,17 @@ Flutter client (`android/`) doesn't exist yet; **User** below is the
 intended client boundary, exercised today via `scripts/v2_smoke_test.py`
 / `scripts/ws_smoke_test.py` and FastAPI's `/docs` UI.
 
+**Not the same diagram as the manuscript's Figure 2/Figure 3.** The
+thesis's own Context Diagram and Level 1 DFD (Chapter 3, Requirement
+Analysis) are a *conceptual* diagram naming three external entities —
+Teacher, Student, Researcher/System Administrator. This file is an
+*implementation* diagram of the single-role backend that actually
+exists today (one `User`/JWT account type, no role field). Both are
+intentionally kept, at different levels of abstraction — see
+`docs/paper-vs-implementation.md` for the entity mapping and why the
+backend's single-role model isn't a gap against the manuscript's
+functional requirements.
+
 **Notation:** rectangle = external entity, rounded box = process,
 cylinder = data store, labeled arrow = data flow.
 

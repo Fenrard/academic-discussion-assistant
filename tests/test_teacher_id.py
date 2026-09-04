@@ -6,6 +6,7 @@ def test_perfect_predictions():
     actuals = [True, True, False, False]
     result = compute_teacher_id_metrics(predictions, actuals)
 
+    assert result["accuracy"] == 1.0
     assert result["precision"] == 1.0
     assert result["recall"] == 1.0
     assert result["f1"] == 1.0
@@ -25,6 +26,7 @@ def test_false_accept_and_false_reject():
     assert counts["false_positive"] == 1
     assert counts["false_negative"] == 1
     assert counts["true_negative"] == 0
+    assert result["accuracy"] == round(2 / 4, 4)  # 2 correct (TP) out of 4 segments, TN==0
     assert result["false_accept_rate"] == 1.0  # only unenrolled segment, and it was accepted
     assert result["false_reject_rate"] == round(1 / 3, 4)  # 1 of 3 enrolled segments rejected
 
