@@ -107,7 +107,7 @@ academic-discussion-assistant/
 │   ├── latency/
 │   ├── reports/
 │   └── plots/
-├── docs/
+├── docs/                     # DFD.md (Level 0 + Level 1 data flow diagrams), DevelopmentLog.md, future_ideas.md
 ├── scripts/                  # Dev utilities only, NOT app code
 ├── tests/
 └── deployment/               # Future / Docker
