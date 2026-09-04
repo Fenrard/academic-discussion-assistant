@@ -23,8 +23,9 @@ from slowapi.errors import RateLimitExceeded
 
 from backend.api import auth, minutes, sessions, teacher, transcribe
 from backend.core.config import settings
-from backend.core.logging import configure_logging, get_logger, RequestContextMiddleware
+from backend.core.logging import configure_logging, get_logger
 from backend.core.rate_limit import MaxUploadSizeMiddleware, limiter
+from backend.core.request_context import RequestContextMiddleware
 from backend.database.db import init_db
 
 configure_logging(settings.log_level)

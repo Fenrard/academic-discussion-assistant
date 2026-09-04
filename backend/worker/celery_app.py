@@ -17,6 +17,10 @@ from celery import Celery
 from celery.signals import worker_process_init
 
 from backend.core.config import settings
+from backend.core.logging import configure_logging, get_logger
+
+configure_logging(settings.log_level)
+_logger = get_logger("scaitale.worker")
 
 # Registers every ORM model on Base.metadata in THIS process. Each Python process has
 # its own SQLAlchemy metadata state — the API process gets all three imported
@@ -95,22 +99,22 @@ def _load_models():
     try:
         silero_vad_model = load_silero_vad()
     except Exception as error:
-        print(f"[worker startup] Silero VAD failed to load, enable_vad requests will fail: {error}")
+        _logger.warning(f"Silero VAD failed to load, enable_vad requests will fail: {error}")
 
     diarization_model = None
     if settings.hf_token:
         try:
             diarization_model = load_diarization_model(settings.hf_token)
         except Exception as error:
-            print(f"[worker startup] Diarization model failed to load, enable_diarization requests will fail: {error}")
+            _logger.warning(f"Diarization model failed to load, enable_diarization requests will fail: {error}")
     else:
-        print("[worker startup] HF_TOKEN not set — diarization unavailable until it is.")
+        _logger.info("HF_TOKEN not set — diarization unavailable until it is.")
 
     teacher_verification_model = None
     try:
         teacher_verification_model = load_verification_model()
     except Exception as error:
-        print(f"[worker startup] Teacher verification model unavailable, enable_teacher_verification requests will fail: {error}")
+        _logger.warning(f"Teacher verification model unavailable, enable_teacher_verification requests will fail: {error}")
 
     return LoadedModels(
         whisper_model=whisper_model,

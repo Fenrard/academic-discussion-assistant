@@ -10,7 +10,37 @@
 
 **Full thesis title:** *"Development and Evaluation of a Noise-Aware Code-Switching Multilingual Speech Recognition and Automated Summarization System for Hiligaynon Classroom Discourse"*
 
+⚠️ **Title inconsistency, flagged not resolved:** this title doesn't match README.md's header (also doesn't match this section either), and neither matches the phrasing in the Thesis Objectives section below (given verbatim by Nathan, presumably straight from the actual proposal/manuscript). Three different phrasings across this repo's own docs — pick the one that's actually on file with the panel/registrar and make the other two match it; not a call to make without that information.
+
 **Repo name:** `academic-discussion-assistant`
+
+---
+
+## Thesis Objectives (verbatim, as given — the actual source to write the manuscript against)
+
+**General Objective:** The study aims to design and develop a prototype teacher voice-prioritized multilingual classroom transcription and structured draft minute generation system that supports the clarity, accessibility, and usability of instructional content in multilingual classroom environments.
+
+**Specific Objectives:**
+1. To develop a system for capturing and processing classroom audio in noisy, real-world environments.
+2. To implement teacher voice recognition using speaker embedding techniques to identify and prioritize instructional speech.
+3. To integrate a multilingual speech recognition model for transcribing code-switched classroom discourse involving Hiligaynon, Filipino, and English, adapting it to Hiligaynon through parameter-efficient fine-tuning, and to evaluate its performance under low-resource language conditions.
+4. To generate structured draft classroom minutes including key points, topics, definitions, and tasks from transcribed speech.
+5. To evaluate the system's technical performance in terms of transcription accuracy, teacher identification accuracy, and latency.
+6. To evaluate the system's usability through user-based assessment of usability, perceived usefulness, and perceived comprehension support.
+
+### Honest status against each objective (updated as of this pass — re-derive, don't assume stale)
+
+| Objective | Status | What's missing |
+|---|---|---|
+| General | Backend built and verified; no client, no fine-tuned model, no real-classroom validation yet | Flutter, fine-tuning run, real-world testing |
+| 1. Capture + process noisy audio | Processing pipeline built and tested on clean lab audio only | Real capture path (Flutter), zero real noisy-classroom audio run through it yet |
+| 2. Identify + prioritize instructional speech | Both halves now implemented — identification (SpeechBrain ECAPA) and prioritization (teacher-weighted keywords/minutes, `teacher_speech_ratio`) | Threshold uncalibrated against real enrolled-vs-unenrolled data |
+| 3. Multilingual ASR + Hiligaynon fine-tuning + low-resource eval | Whisper integration done; fine-tuning *tooling* ready, adaptation never run; evaluation *tooling* ready, zero real results | The corpus, the training run, the real WER numbers |
+| 4. Structured minutes: key points, topics, definitions, tasks | All four now implemented (`definitions` was the gap, closed this pass) | Precision/recall unmeasured until real classroom audio exists |
+| 5. Technical evaluation (accuracy, teacher-ID, latency) | Instrumentation complete and proven (`evaluation/`) | The evaluation itself — real numbers for the manuscript — is unrun |
+| 6. Usability evaluation | Standard SUS scoring math only | No instrument for "perceived usefulness"/"perceived comprehension support" beyond generic SUS yet; needs the finished app + real respondents |
+
+Objectives 2 and 4 were the two gaps where the code didn't yet match what this list actually says — both closed; see "Resolved this pass, round 4" further down.
 
 ---
 
@@ -45,18 +75,20 @@
 
 ## Pipeline Order (Locked)
 
+**Corrected against the actual built code** (`backend/services/audio_service.py: run_pipeline()`) — the order originally planned here had SpeechBrain and pyannote running *before* Faster-Whisper, which turned out not to be implementable as literally stated: teacher verification (as built) slices audio per *Whisper segment* to extract each embedding, and diarization's speaker-label merge (`merge_transcript_with_speakers()`) attaches labels onto Whisper's segments — both structurally need those segments to already exist. The real, tested, working order:
+
 ```
 Flutter (WebSocket chunks)
   → FastAPI
     → FFmpeg normalize + loudnorm (ALWAYS ON, never optional)
     → pyrnnoise denoising (48kHz round-trip) [enable_denoise toggle]
     → Silero VAD          [enable_vad toggle]
-    → SpeechBrain ECAPA   [enable_teacher_verification toggle]
-    → pyannote diarization [enable_diarization toggle, OPTIONAL]
-    → Faster-Whisper
-    → Glossary refinement
-    → TextRank keyword extraction
-    → Rule-based minutes generation
+    → Faster-Whisper transcription
+    → Glossary refinement (applied per-segment, right after transcription)
+    → pyannote diarization + speaker-label merge [enable_diarization toggle, OPTIONAL]
+    → SpeechBrain ECAPA teacher verification (per Whisper segment) [enable_teacher_verification toggle]
+    → TextRank keyword extraction (session finalize, not per-chunk)
+    → Rule-based minutes generation (session finalize, not per-chunk)
     → Storage
     → JSON response → Flutter
 ```
@@ -154,9 +186,11 @@ These are dev utilities. Their logic gets promoted into `backend/services/` — 
 ## Data Flow
 
 ```
-Android → FastAPI → Audio Service → RNNoise → Silero → Teacher Verification
-→ Diarization → Whisper → Database → JSON → Android
+Android → FastAPI → Audio Service → RNNoise → Silero → Whisper
+→ Diarization → Teacher Verification → Database → JSON → Android
 ```
+
+(Whisper before Diarization before Teacher Verification — see "Pipeline Order (Locked)" above for why that order is structural, not arbitrary.)
 
 ---
 
@@ -206,11 +240,13 @@ Android → FastAPI → Audio Service → RNNoise → Silero → Teacher Verific
 
 ## Hybrid Edge/Server Design (Architectural Property)
 
+**Status: design intent, not yet realized.** Everything below — VAD included — currently runs server-side in `backend/worker/`; there is no on-device component because Flutter doesn't exist yet. This section describes the target split for whoever builds the client, not the current system's actual behavior. Don't read "Local (on-device)" below as something already benchmarked or working.
+
 - Local (on-device): VAD + noise suppression — lightweight, always available
 - Server (FastAPI): diarization, teacher verification, Whisper transcription
 - **Graceful degradation when offline:** local fallback path is an explicit, testable property
-- Benchmark full pipeline on actual target hardware in Week 2 — isolate model inference vs integration overhead before FastAPI wiring
-- If local pipeline too slow: push diarization/verification to server path, keep VAD+RNNoise local — decide Week 2, not Week 4
+- Benchmark full pipeline on actual target hardware — isolate model inference vs integration overhead before wiring into Flutter
+- If local pipeline too slow: push diarization/verification to server path, keep VAD+RNNoise local
 
 ---
 
@@ -226,14 +262,16 @@ Android → FastAPI → Audio Service → RNNoise → Silero → Teacher Verific
 
 ## Explicitly Out of Scope (Defensible)
 
+*Superseded in one place, noted so a reader landing here first isn't misled:* "Cloud infrastructure / production scaling" below was the original scope line — "Production Architecture (Round 3)" further down is an explicit, later, user-requested reversal of that specific boundary (Docker, Postgres, auth, CI). Everything else on this list still stands.
+
 - Training ASR models from scratch
 - iOS compatibility
 - Full offline mobile deployment
-- Cloud infrastructure / production scaling
+- ~~Cloud infrastructure / production scaling~~ — reversed, see note above and "Production Architecture (Round 3)"
 - Polished UI beyond functional prototype
 - Full pyannote diarization (optional, not mandatory)
 - **Kinaray-a** — explicitly considered and cut; trilingual scope is final
-- Deferred features tracked in `future_ideas.md` at repo root — ideas go there, not into scope
+- Deferred features tracked in `docs/future_ideas.md` — ideas go there, not into scope (this file actually lives under `docs/`, not repo root — corrected here; the "Repo Structure" tree above already had it right, this line just hadn't matched)
 
 ---
 
@@ -437,7 +475,7 @@ Triggered by an architecture review that found: `async def` routes calling CPU-b
 
 **DB** — Postgres via Alembic (`backend/database/migrations/`), hand-written initial migration (no live Postgres in this dev sandbox *at the time it was written* — since verified: PostgreSQL 17 installed natively and the migration run against it directly, `upgrade head` → `downgrade base` → `upgrade head` again, clean). SQLite stays the default when `DATABASE_URL` is unset, so local dev/`pytest` still need no infra.
 
-**Observability** — `backend/core/logging.py`: stdlib `logging` + JSON formatter + request-ID contextvar/middleware (no new dependency). `prometheus-fastapi-instrumentator` on `/metrics`. Optional Sentry via `SENTRY_DSN` (no-op unset).
+**Observability** — stdlib `logging` + JSON formatter, no new dependency, split across two files on purpose: `backend/core/logging.py` (`configure_logging()`/`get_logger()`, deliberately starlette-free) is shared by both tiers, `backend/core/request_context.py` (the request-ID contextvar + HTTP middleware, genuinely needs starlette) is API-only. A naive single-file version was caught and fixed: it would have made the worker image import starlette at runtime despite `requirements-worker.txt` never installing it — worker's own startup diagnostics (model load failures) now go through the shared structured logger too, not `print()`. `prometheus-fastapi-instrumentator` on `/metrics`. Optional Sentry via `SENTRY_DSN` (no-op unset).
 
 **Rate limiting** — `slowapi` on `/auth/login`, `/transcribe`, `/teachers/enroll` — confirmed live (12 rapid `/auth/login` calls: first 10 returned `401`, 11th and 12th returned `429`). `MaxUploadSizeMiddleware` rejects an oversized `Content-Length` before the body is read.
 
