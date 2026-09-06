@@ -103,8 +103,8 @@ class _LiveRecordingScreenState extends State<LiveRecordingScreen> {
       const RecordConfig(encoder: AudioEncoder.pcm16bits, sampleRate: 16000, numChannels: 1),
     );
     _micSubscription = pcmStream.listen((data) {
-      for (final wavChunk in _chunker!.add(data)) {
-        _wsClient.sendChunk(wavChunk);
+      for (final chunk in _chunker!.add(data)) {
+        if (chunk.shouldSend) _wsClient.sendChunk(chunk.wav);
       }
     });
 
@@ -142,7 +142,7 @@ class _LiveRecordingScreenState extends State<LiveRecordingScreen> {
     setState(() => _phase = _Phase.stopping);
     await _micSubscription?.cancel();
     final leftover = _chunker?.flush();
-    if (leftover != null) _wsClient.sendChunk(leftover);
+    if (leftover != null && leftover.shouldSend) _wsClient.sendChunk(leftover.wav);
     await _recorder.stop();
     _wsClient.sendEnd();
     // Navigation happens from _handleWsMessage once session_ended arrives.
