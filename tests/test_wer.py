@@ -1,4 +1,8 @@
-from evaluation.wer import character_error_rate, compute_error_rates_by_group, word_error_rate
+import sys
+
+import pytest
+
+from evaluation.wer import character_error_rate, compute_error_rates_by_group, main, word_error_rate
 
 
 def test_word_error_rate_identical_transcripts():
@@ -49,3 +53,23 @@ def test_compute_error_rates_by_group_mismatched_lengths_raises():
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_main_reports_a_clean_error_on_a_non_utf8_transcript_file(tmp_path, monkeypatch, capsys):
+    # Regression test: a human typing a reference transcript on Windows can
+    # easily save it in the system ANSI codepage (Notepad's historical
+    # default) rather than UTF-8. UnicodeDecodeError is a ValueError
+    # subclass, not an OSError, so `except OSError` let it fall straight
+    # through as an unhandled traceback instead of the same clean
+    # "Error: ..." + exit(1) every other bad-input path here gets.
+    reference_path = tmp_path / "reference.txt"
+    hypothesis_path = tmp_path / "hypothesis.txt"
+    reference_path.write_bytes("kumusta ka, guro? — na-miss ka namon.".encode("cp1252"))
+    hypothesis_path.write_text("kumusta ka guro", encoding="utf-8")
+
+    monkeypatch.setattr(sys, "argv", ["wer.py", str(reference_path), str(hypothesis_path)])
+    with pytest.raises(SystemExit) as exit_info:
+        main()
+
+    assert exit_info.value.code == 1
+    assert "utf-8" in capsys.readouterr().out.lower()

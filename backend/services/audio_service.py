@@ -36,7 +36,20 @@ from backend.services.glossary_service import Glossary
 
 SAMPLE_RATE = settings.sample_rate
 RNNOISE_SAMPLE_RATE = settings.rnnoise_sample_rate
-SUPPORTED_EXTENSIONS = (".wav", ".mp3", ".m4a", ".ogg", ".webm", ".flac", ".aac")
+# Beyond the original studio-ish formats: .3gp/.3gpp/.amr are what older or
+# basic Android voice-recorder and phone-call-recorder apps actually produce,
+# and .mp4/.mov cover a phone/camera app recording video just to capture
+# room audio -- all real possibilities for how a classroom recording
+# actually reaches this repo (see CLAUDE.md's "Nathan recording now — phone
+# recorder in classroom is acceptable"). FFmpeg demuxes by sniffing the
+# container's actual bytes, not this extension, and for the video containers
+# only the audio stream is pulled (no video is mapped into the WAV output)
+# -- so widening this allowlist is purely about not rejecting a file FFmpeg
+# can already handle, not a new decoding capability.
+SUPPORTED_EXTENSIONS = (
+    ".wav", ".mp3", ".m4a", ".ogg", ".webm", ".flac", ".aac",
+    ".3gp", ".3gpp", ".amr", ".mp4", ".mov", ".opus", ".wma",
+)
 
 
 def load_whisper_model() -> WhisperModel:

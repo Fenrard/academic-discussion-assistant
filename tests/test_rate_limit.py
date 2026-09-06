@@ -34,3 +34,13 @@ def test_missing_content_length_passes_through():
     client = TestClient(_build_test_app(max_bytes=1000))
     response = client.post("/echo")
     assert response.status_code == 200
+
+
+def test_malformed_content_length_is_rejected_not_crashed():
+    # Regression test: int(content_length) used to run unguarded, so a
+    # non-integer header (garbage, or a hand-crafted/malicious request)
+    # raised an uncaught ValueError -- a request this middleware couldn't
+    # even evaluate turned into a raw 500 instead of a clean 4xx.
+    client = TestClient(_build_test_app(max_bytes=1000))
+    response = client.post("/echo", content=b"x" * 10, headers={"Content-Length": "not-a-number"})
+    assert response.status_code == 400
