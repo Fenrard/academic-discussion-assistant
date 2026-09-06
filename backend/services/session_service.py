@@ -76,7 +76,29 @@ def materialize_transcript(chunk_results: dict) -> dict:
 
 
 def append_chunk_result(db: DbSession, session: SessionRecord, chunk_index: int, pipeline_result: dict) -> SessionRecord:
-    """Records one chunk's raw pipeline output and recomputes the derived transcript fields from it."""
+    """
+    Records one chunk's raw pipeline output and recomputes the derived
+    transcript fields from it.
+
+    Refreshes `session` with a row-level lock (SELECT ... FOR UPDATE, on
+    dialects that support it) before reading chunk_results, rather than
+    trusting whatever the caller's own db.get() loaded earlier: under a
+    real multi-worker pool, two chunks of the same session can finish on
+    different worker processes near-simultaneously, each with its own DB
+    session that loaded chunk_results before the other's write landed.
+    Without a lock, whichever commits last silently overwrites the
+    other's chunk (a lost update, no exception raised anywhere) — the
+    lock forces the second call to wait for the first transaction to
+    commit and release it, then re-read the now-current chunk_results
+    before merging its own chunk on top. On SQLite (this project's
+    dev/test default), FOR UPDATE isn't part of the dialect's grammar, so
+    this is a no-op there — it only takes effect, and only matters, under
+    the real Postgres multi-worker deployment where the race is actually
+    possible; proven directly in tests/test_session_service.py against a
+    real Postgres instance, not just reasoned about.
+    """
+    db.refresh(session, with_for_update=True)
+
     chunk_results = dict(session.chunk_results)
     chunk_results[str(chunk_index)] = pipeline_result
     session.chunk_results = chunk_results
