@@ -127,13 +127,9 @@ academic-discussion-assistant/
 │   ├── models/
 │   ├── utils/
 │   └── main.py
-├── ai/                       # Reusable AI modules (source code only)
-│   ├── whisper/
-│   ├── rnnoise/
-│   ├── silero/
-│   ├── pyannote/
-│   ├── speechbrain/
-│   └── finetuning/
+├── ai/                       # finetuning/ only has real content (LoRA train + convert scripts) — whisper/,
+│                             # rnnoise/, silero/, pyannote/, speechbrain/ are empty, untracked leftovers from
+│                             # early planning; that wrapping logic actually lives in backend/services/ instead
 ├── models/                   # Trained weights/embeddings only (NO source code)
 ├── datasets/
 │   ├── raw/
@@ -143,16 +139,12 @@ academic-discussion-assistant/
 ├── recordings/
 ├── transcripts/
 ├── experiments/              # Per-experiment folders for thesis results
-├── evaluation/
-│   ├── wer/
-│   ├── cer/
-│   ├── latency/
-│   ├── reports/
-│   └── plots/
-├── docs/                     # DFD.md (Level 0 + Level 1 data flow diagrams), DevelopmentLog.md, future_ideas.md
+├── evaluation/                # wer.py, latency.py, teacher_id.py, sus.py, resources.py — flat scripts, not the
+│                               # wer/cer/latency/ subdirectories once planned; reports/ and plots/ are real output dirs
+├── docs/                     # DFD.md (Level 0 + Level 1 data flow diagrams), DevelopmentLog.md, future_ideas.md, paper-vs-implementation.md
 ├── scripts/                  # Dev utilities only, NOT app code
 ├── tests/
-└── deployment/               # Future / Docker
+└── deployment/               # Built — Dockerfile.api, Dockerfile.worker, docker-compose.yml (see "Production Architecture" below)
 ```
 
 **.gitignore must include:** `android/.idea/`
@@ -196,11 +188,11 @@ These are dev utilities. Their logic gets promoted into `backend/services/` — 
 ## Data Flow
 
 ```
-Android → FastAPI → Audio Service → RNNoise → Silero → Whisper
-→ Diarization → Teacher Verification → Database → JSON → Android
+Android (local RMS VAD gate) → FastAPI → Audio Service → RNNoise → Silero
+→ Whisper → Diarization → Teacher Verification → Database → JSON → Android
 ```
 
-(Whisper before Diarization before Teacher Verification — see "Pipeline Order (Locked)" above for why that order is structural, not arbitrary.)
+(Whisper before Diarization before Teacher Verification — see "Pipeline Order (Locked)" above for why that order is structural, not arbitrary. "Android (local RMS VAD gate)" is `android/lib/core/local_vad.dart` — see "Hybrid Edge/Server Design" and "Flutter Client (Built)" — a lightweight energy check deciding whether a chunk is even worth sending, separate from and upstream of the server's own Silero VAD stage.)
 
 ---
 
@@ -547,7 +539,7 @@ The original 14-day sprint list (items 1–4, 8, 9, 11) is done — see "Backend
 - **Real classroom data collection** (Nathan + Andrei + Dan Joseph) — blocks everything below.
 - **Fine-tuning run** — `ai/finetuning/` is a tested, ready scaffold with zero trained checkpoints; needs the corpus above.
 - **Real evaluation numbers** (WER, teacher-ID, latency for the manuscript) — `evaluation/` scripts are built and tested; zero real results exist, needs real reference transcripts + labeled speaker data.
-- **Usability study (SUS)** — `evaluation/sus.py` is scoring math only; needs the finished Flutter app + real respondents. "Perceived usefulness"/"perceived comprehension support" also have no instrument built yet — needs its own survey items beyond generic SUS.
+- **Usability study (SUS)** — `evaluation/sus.py` is scoring math only; the Flutter app itself is now built and emulator-verified, but the study needs it on a physical device and real respondents to actually use it. "Perceived usefulness"/"perceived comprehension support" also have no instrument built yet — needs its own survey items beyond generic SUS.
 - **Docker containers actually built and run** — Dockerfiles/compose written and CI-exercises the same infra shape, but no container from these specific files has been built; optional unless deploying past the thesis.
 - **Object storage** for `POST /transcribe`'s whole-file path across separate machines — only matters for a true multi-host deployment.
 
