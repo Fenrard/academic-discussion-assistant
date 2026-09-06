@@ -250,13 +250,31 @@ Android → FastAPI → Audio Service → RNNoise → Silero → Whisper
 
 ## Hybrid Edge/Server Design (Architectural Property)
 
-**Status: design intent, not yet realized.** Everything below — VAD included — currently runs server-side in `backend/worker/`; there is no on-device component because Flutter doesn't exist yet. This section describes the target split for whoever builds the client, not the current system's actual behavior. Don't read "Local (on-device)" below as something already benchmarked or working.
+**Status: partially realized.** On-device VAD is now real —
+`android/lib/core/local_vad.dart` — but it's a lightweight energy/RMS gate,
+not a learned model, and its threshold (~-40 dBFS) is a documented heuristic
+default, unvalidated against real classroom audio (same "unmeasured until
+real data exists" caveat this file already uses for
+`teacher_verification_threshold`). Noise suppression and the offline
+fallback path below are still NOT built — don't read either of those two as
+already working.
 
-- Local (on-device): VAD + noise suppression — lightweight, always available
-- Server (FastAPI): diarization, teacher verification, Whisper transcription
-- **Graceful degradation when offline:** local fallback path is an explicit, testable property
-- Benchmark full pipeline on actual target hardware — isolate model inference vs integration overhead before wiring into Flutter
-- If local pipeline too slow: push diarization/verification to server path, keep VAD+RNNoise local
+- Local (on-device): **VAD — done.** `PcmChunker` runs `LocalVad`'s windowed
+  RMS check (sub-frames, not one average over the whole 2–10s chunk — a
+  short real utterance inside an otherwise-quiet chunk would otherwise read
+  as silence) on every outgoing chunk before it ever reaches the WS, with a
+  1-chunk "hangover" (a chunk immediately following detected speech is still
+  sent even if it reads quiet itself) so trailing speech isn't clipped at
+  the chunk boundary. The very first chunk of a session is always sent
+  regardless of its own content. **Noise suppression — deliberately not
+  attempted**: real DSP noise suppression can't be safely validated without
+  real audio and a human listening pass; shipping an untested half-measure
+  risked silently degrading real speech, which was judged worse than
+  leaving it open and documented.
+- Server (FastAPI): diarization, teacher verification, Whisper transcription — unchanged, fully server-side
+- **Graceful degradation when offline:** still NOT built. A local-record-then-sync fallback needs local storage, a background sync/retry mechanism, and its own UI state — a genuinely larger feature than the VAD pre-filter above, left open.
+- Benchmark full pipeline on actual target hardware — isolate model inference vs integration overhead before wiring into Flutter — still open
+- If local pipeline too slow: push diarization/verification to server path, keep VAD+RNNoise local — the VAD half of this is now real; the RNNoise half remains the open half
 
 ---
 
@@ -501,19 +519,21 @@ Triggered by an architecture review that found: `async def` routes calling CPU-b
 
 Lives at `android/` (repo root — see "Repo Structure" above; Flutter's own generated native Android glue folder nests inside as `android/android/`, an accepted cosmetic quirk of that layout choice, not a mistake). All six required screens (see "Flutter Screens (Required)") are built against the real backend contract, not a mock — verified via a real end-to-end run on an Android emulator (Pixel_7 AVD, API 37) against the actual FastAPI + Celery + Postgres + Redis stack running on this same dev machine, not just `flutter analyze`/`flutter test` passing in isolation.
 
-- **`lib/core/`** — `api_client.dart` (one method per `backend/api/*.py` endpoint, throws `ApiException`, global 401 → `AuthController.forceLogout()`), `ws_transcribe_client.dart` (drives `/ws/transcribe`'s start/chunk/end/session_ended protocol), `auth_controller.dart`, `settings_controller.dart` (server URL + `PipelineOptions`, persisted via `shared_preferences`), `secure_storage.dart` (JWT only, via `flutter_secure_storage`), `wav_encoder.dart` + `pcm_chunker.dart` (wrap `record` package's headerless PCM16 stream into self-contained WAV chunks per `chunk_duration_seconds` — required because the WS contract needs each binary frame to be a complete WAV file FFmpeg can parse, and `record`'s `startStream()` only emits headerless PCM), `polling.dart` (`pollUntil()`, exponential backoff, used for both whole-file-session and teacher-enrollment status polling).
+- **`lib/core/`** — `api_client.dart` (one method per `backend/api/*.py` endpoint, throws `ApiException`, global 401 → `AuthController.forceLogout()`), `ws_transcribe_client.dart` (drives `/ws/transcribe`'s start/chunk/end/session_ended protocol), `auth_controller.dart`, `settings_controller.dart` (server URL + `PipelineOptions`, persisted via `shared_preferences`), `secure_storage.dart` (JWT only, via `flutter_secure_storage`), `wav_encoder.dart` + `pcm_chunker.dart` (wrap `record` package's headerless PCM16 stream into self-contained WAV chunks per `chunk_duration_seconds` — required because the WS contract needs each binary frame to be a complete WAV file FFmpeg can parse, and `record`'s `startStream()` only emits headerless PCM), `local_vad.dart` (on-device energy-based VAD pre-filter, round 5 below — `PcmChunker` gates on it before a chunk ever reaches the WS), `polling.dart` (`pollUntil()`, exponential backoff, used for both whole-file-session and teacher-enrollment status polling).
 - **`lib/models/`** — `pipeline_config.dart` (`Preset.{fast,balanced,accurate}` → `PipelineOptions`, field names matching `backend/schemas/pipeline.py` exactly; `balanced` matches that schema's own defaults), plus `fromJson`/`toJson` models mirroring every other `backend/schemas/` file.
 - **`lib/screens/`** — `auth/` (login/register), `home/` (session library), `enrollment/` (teacher voice enrollment), `recording/` (live recording + subtitles), `transcript/` (search + highlight, client-side substring matching per the backend's "no search endpoint" contract), `minutes/` (structured minutes + export via `share_plus`), `settings/` (server URL, preset selector, advanced panel with outcome-framed labels never raw parameter names, logout).
-- **Tests** (`android/test/`, 48 passing) — pure-Dart unit tests for every piece of logic that doesn't need a device: `pipeline_config_test.dart` (preset values + exact `toJson()` key names — the single highest-risk typo surface in the app), `wav_encoder_test.dart` (RIFF/WAVE/fmt/data header correctness), `pcm_chunker_test.dart` (chunk sizing, remainder-carry, flush), model `fromJson` parsing against literal fixtures (including missing-optional-field cases), `ws_messages_test.dart`, `polling_test.dart`.
+- **Tests** (`android/test/`, 57 passing) — pure-Dart unit tests for every piece of logic that doesn't need a device: `pipeline_config_test.dart` (preset values + exact `toJson()` key names — the single highest-risk typo surface in the app), `wav_encoder_test.dart` (RIFF/WAVE/fmt/data header correctness), `pcm_chunker_test.dart` (chunk sizing, remainder-carry, flush, VAD gating + hangover sequence), `local_vad_test.dart` (RMS correctness, threshold boundary, windowing catches a short burst a whole-buffer average would miss), model `fromJson` parsing against literal fixtures (including missing-optional-field cases), `ws_messages_test.dart`, `polling_test.dart`.
 - **CI** — `.github/workflows/ci.yml` gained a second `flutter` job (`flutter pub get && flutter analyze && flutter test`), pinned to the exact Flutter version this was built against rather than floating `stable`.
 
 **Verified for real, on-device, this session** (not just unit tests): register → login (JWT persists across app restart, confirmed by killing and relaunching the app) → teacher voice enrollment (real mic recording via `record`, real multipart upload, real SpeechBrain embedding extraction via the Celery worker, real `pollUntil()` backoff visible in the request log, ends in a green "Ready" badge) → live recording (`WS /ws/transcribe`, real mic streaming, ~2 dozen chunks actually processed by the worker over several minutes without dropping the connection) → stop → session finalizes server-side (`status: "completed"`) → Transcript screen loads the real session. Settings screen's preset/slider values were confirmed to exactly reflect `PipelinePresets.balanced` (beam 5, chunk 3s) as rendered on-screen, not just in code.
 
 **One real bug found and fixed by this on-device run, not by the unit tests**: the WS's `onDone` handler fired on the *graceful* closure that follows a successful `session_ended` (the server closes the socket right after sending it), racing the screen's own navigation to the Transcript screen and occasionally popping back over it — `_wsClient.close()` is now called (marking the closure as intentional) the moment `session_ended` arrives, before navigating. This is exactly the kind of timing bug unit tests over pure logic can't catch; only running the real WS round-trip against the real backend surfaced it.
 
+**Resolved this pass, round 5** (closing the specific hybrid-architecture gap flagged right after the client build — see "Hybrid Edge/Server Design" above): on-device energy-based VAD (`android/lib/core/local_vad.dart`) — the client now decides locally, before an outgoing chunk is ever sent over the WS, whether it plausibly contains speech, with a 1-chunk hangover so real speech trailing across a chunk boundary isn't clipped. Verified both by 9 new unit tests and by a fresh real on-device run (see below) confirming the gating doesn't hang or misbehave even when literally every chunk is silence — the adversarial case, and exactly what the emulator's mic produces. Noise suppression and offline-fallback recording remain explicitly open, not attempted this pass — see "Hybrid Edge/Server Design" for why.
+
 **Known gaps, not oversights**:
 - Tested on the Android **emulator**, not a physical device — real classroom deployment needs a phone on the same Wi-Fi as the backend, which the Settings screen's editable server-address field supports (`10.0.2.2` is emulator-only; a physical device needs the host's real LAN IP) but which hasn't itself been exercised.
-- The emulator's virtual microphone is silent, so no real classroom audio has been transcribed through the client yet — VAD correctly returned "no speech detected" throughout testing rather than hallucinating, which is the correct behavior for silence, but it means transcription accuracy on real speech through the *client* (as opposed to through `scripts/`, already covered by backend tests) is unverified.
+- The emulator's virtual microphone is silent, so no real classroom audio has been transcribed through the client yet. Both the server pipeline's VAD and the client's own `LocalVad` (added round 5, below) correctly treat this as "no speech" rather than hallucinating — but this also means an emulator run now sends far fewer chunks to the server than the pre-VAD build did (typically just the hangover-guaranteed first chunk of a session), a real wire-behavior change, not just an internal one. Transcription accuracy on real speech through the *client* (as opposed to through `scripts/`, already covered by backend tests) remains unverified.
 - "Import audio file" (`POST /transcribe`'s whole-file path) has no UI — deliberately descoped, not one of the six required screens; noted in `docs/future_ideas.md`.
 - Session list swipe-to-delete, the Minutes screen with real (non-empty) content, and transcript search/highlight against real multi-segment text were code-reviewed but not exercised on-device this session (no session with actual detected speech existed yet to view).
 
