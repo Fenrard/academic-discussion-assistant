@@ -106,11 +106,25 @@ def plot_stage_latencies(aggregate: dict, output_name: str = "stage_latencies.pn
 
 
 def benchmark_pipeline(audio_path: Path, runs: int = 3, enable_denoise: bool = False, enable_vad: bool = True) -> list[dict]:
-    """Loads the Whisper model once and runs the real pipeline `runs` times against `audio_path`."""
+    """Loads Whisper (and Silero VAD, if enabled) once and runs the real pipeline `runs` times against `audio_path`."""
     from backend.services.audio_service import LoadedModels, load_whisper_model, run_pipeline
     from backend.services.glossary_service import load_glossary
 
-    models = LoadedModels(whisper_model=load_whisper_model(), glossary=load_glossary())
+    # silero_vad_model matters here specifically: audio_service.detect_speech()
+    # falls back to `silero_vad_model or load_silero_vad()` when it's None,
+    # which is a reasonable best-effort default elsewhere but would mean this
+    # benchmark's own "vad" stage timer measures a full model reload on every
+    # single --runs iteration instead of real per-call VAD cost — silently
+    # inflating the exact per-stage latency numbers this script exists to
+    # produce for the manuscript. Loading it once here matches how the real
+    # worker process does it (backend/worker/celery_app.py's _load_models()).
+    silero_vad_model = None
+    if enable_vad:
+        from silero_vad import load_silero_vad
+
+        silero_vad_model = load_silero_vad()
+
+    models = LoadedModels(whisper_model=load_whisper_model(), glossary=load_glossary(), silero_vad_model=silero_vad_model)
 
     results = []
     for _ in range(runs):

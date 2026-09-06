@@ -31,7 +31,7 @@ class SessionRecord(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_new_session_id)
     owner_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
     title: Mapped[str | None] = mapped_column(String, nullable=True)
-    status: Mapped[str] = mapped_column(String, default="in_progress")  # in_progress | processing | completed | failed
+    status: Mapped[str] = mapped_column(String, default="in_progress")  # in_progress | completed | failed | interrupted
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)

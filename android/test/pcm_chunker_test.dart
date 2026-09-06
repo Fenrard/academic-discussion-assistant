@@ -129,5 +129,43 @@ void main() {
       expect(flushed, isNotNull);
       expect(flushed!.shouldSend, isFalse);
     });
+
+    test('a gated-out chunk carries no WAV bytes -- building them would be wasted work', () {
+      final chunker = PcmChunker(chunkDuration: const Duration(milliseconds: 100));
+      chunker.add(silentBytes(3200)); // first chunk: sent regardless
+      final notSent = chunker.add(silentBytes(3200)).single;
+      expect(notSent.shouldSend, isFalse);
+      expect(notSent.wav, isEmpty);
+    });
+
+    test('LocalVad sample rate defaults from PcmChunker.sampleRate, not a fixed 16000', () {
+      // Regression test: the default vad used to be `const LocalVad()`, always
+      // 16000 regardless of what sampleRate PcmChunker was actually given.
+      final chunker = PcmChunker(sampleRate: 8000, chunkDuration: const Duration(milliseconds: 100));
+      expect(chunker.vad.sampleRate, 8000);
+    });
+
+    test('keepAliveInterval forces a chunk through after enough consecutive silence', () {
+      final chunker = PcmChunker(
+        chunkDuration: const Duration(milliseconds: 100),
+        keepAliveInterval: const Duration(milliseconds: 300), // 3 chunks
+      );
+
+      // Sent chunks land at positions 1 and 4 -- a gap of 3 chunks (300ms),
+      // never more, regardless of how long the real silence continues.
+      expect(chunker.add(silentBytes(3200)).single.shouldSend, isTrue); // 1: first chunk default
+      expect(chunker.add(silentBytes(3200)).single.shouldSend, isFalse); // 2: baseline silence
+      expect(chunker.add(silentBytes(3200)).single.shouldSend, isFalse); // 3: still within the keepalive window
+      expect(chunker.add(silentBytes(3200)).single.shouldSend, isTrue); // 4: keepalive fires, gap capped at 3
+      expect(chunker.add(silentBytes(3200)).single.shouldSend, isFalse); // 5: counter reset, back to gating
+    });
+
+    test('keepAliveInterval: null disables the heartbeat entirely', () {
+      final chunker = PcmChunker(chunkDuration: const Duration(milliseconds: 100), keepAliveInterval: null);
+      chunker.add(silentBytes(3200)); // first chunk default
+      for (var i = 0; i < 50; i++) {
+        expect(chunker.add(silentBytes(3200)).single.shouldSend, isFalse);
+      }
+    });
   });
 }

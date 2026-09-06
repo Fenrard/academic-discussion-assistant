@@ -26,6 +26,7 @@ session_service is fine to import eagerly — its own dependency chain
 import base64
 from pathlib import Path
 
+from backend.core.logging import get_logger
 from backend.core.pubsub import publish_sync
 from backend.database.db import SessionLocal
 from backend.models.session import SessionRecord
@@ -33,6 +34,8 @@ from backend.schemas.pipeline import PipelineOptions
 from backend.services import session_service
 from backend.utils.audio_io import cleanup_temp_files, write_temp_audio
 from backend.worker.celery_app import celery_app
+
+_logger = get_logger("scaitale.worker.tasks")
 
 
 def _run_pipeline_for_chunk(audio_path: Path, options: PipelineOptions, enrolled_teachers: list[tuple[str, list]]) -> dict:
@@ -68,10 +71,16 @@ def transcribe_chunk_task(
     channel = f"session:{session_id}:results"
     options = PipelineOptions(**options_dict)
     enrolled = [(name, embedding) for name, embedding in enrolled_teachers]
-    temp_path = write_temp_audio(base64.b64decode(audio_b64))
-
+    # temp_path starts None and write_temp_audio() moves inside the try: a
+    # malformed base64 payload or a disk-write failure used to raise here,
+    # *before* any try block existed, so no "chunk_result"/"error" message
+    # was ever published — the WS handler's state["completed"] would never
+    # catch up to state["enqueued"], and the socket would hang open forever
+    # instead of finalizing once the client sent "end".
+    temp_path = None
     db = SessionLocal()
     try:
+        temp_path = write_temp_audio(base64.b64decode(audio_b64))
         result = _run_pipeline_for_chunk(temp_path, options, enrolled)
 
         session = db.get(SessionRecord, session_id)
@@ -90,6 +99,14 @@ def transcribe_chunk_task(
             "transcript_so_far": session.transcript_text,
         })
     except Exception as error:  # noqa: BLE001 — deliberately broad: this is the task's own error boundary
+        # Logged, not just published: a chunk failure only reaches the pubsub
+        # channel while a client is still connected to see it. Without this,
+        # a session where every chunk happens to fail (e.g. a misconfigured
+        # worker) still finalizes as "completed" with an empty transcript —
+        # indistinguishable from a genuinely silent session — with no record
+        # anywhere that the pipeline itself was broken. This at least makes
+        # it visible in the worker's own logs.
+        _logger.error(f"transcribe_chunk_task failed for session={session_id} chunk={chunk_index}: {error}")
         publish_sync(channel, {"type": "error", "chunk_index": chunk_index, "detail": str(error)})
     finally:
         db.close()
@@ -142,13 +159,20 @@ def enroll_teacher_task(self, teacher_id: str, audio_b64: str) -> None:
     api/teacher.py so the client gets an id back immediately); this
     fills in the embedding or records the failure.
     """
-    from backend.services.audio_service import load_waveform
+    from backend.services.audio_service import ingest_audio, load_waveform
     from backend.services.teacher_verification_service import extract_embedding
     from backend.worker.celery_app import get_worker_models
 
-    temp_path = write_temp_audio(base64.b64decode(audio_b64))
+    # Both start None, and write_temp_audio() moves inside the try — same
+    # reasoning as transcribe_chunk_task: a decode/write failure used to
+    # raise before any try block existed, so fail_teacher_enrollment() was
+    # never reached and the row stayed "pending" forever with no way for
+    # the client's polling to ever see a terminal state.
+    temp_path = None
+    standardized_path = None
     db = SessionLocal()
     try:
+        temp_path = write_temp_audio(base64.b64decode(audio_b64))
         models = get_worker_models()
         if models.teacher_verification_model is None:
             session_service.fail_teacher_enrollment(
@@ -156,11 +180,19 @@ def enroll_teacher_task(self, teacher_id: str, audio_b64: str) -> None:
             )
             return
 
-        waveform = load_waveform(temp_path).numpy()
+        # Same "FFmpeg preprocessing is ALWAYS ON" rule every other audio
+        # path follows (CLAUDE.md) -- this was the one entry point that
+        # skipped it, going straight to load_waveform() (which hard-requires
+        # exactly 16000Hz) instead of standardizing first. An enrollment
+        # upload that isn't already precisely 16kHz mono PCM WAV used to
+        # fail with an opaque "Expected 16000Hz audio, got Xhz" error
+        # instead of being normalized like every other audio path.
+        standardized_path = ingest_audio(temp_path, temp_path.with_name(temp_path.stem + "_std.wav"))
+        waveform = load_waveform(standardized_path).numpy()
         embedding = extract_embedding(models.teacher_verification_model, waveform)
         session_service.complete_teacher_enrollment(db, teacher_id, embedding)
     except Exception as error:
         session_service.fail_teacher_enrollment(db, teacher_id, str(error))
     finally:
         db.close()
-        cleanup_temp_files(temp_path)
+        cleanup_temp_files(temp_path, standardized_path)

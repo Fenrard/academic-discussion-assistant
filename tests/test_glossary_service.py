@@ -34,3 +34,15 @@ def test_empty_glossary_is_a_no_op():
 def test_apply_handles_empty_text():
     glossary = Glossary({"ilonggo": "Ilonggo"})
     assert glossary.apply("") == ""
+
+
+def test_apply_does_not_crash_on_a_mixed_case_glossary_key():
+    # Regression test: _replacements used to keep the JSON's original-case
+    # keys while _replace_match looked them up lowercased, so any key that
+    # wasn't already all-lowercase raised KeyError on every match — even
+    # though matching itself is (correctly) case-insensitive.
+    glossary = Glossary({"Sir Ko": "sir ko"})
+    # Match starts uppercase -> replacement's first letter is forced uppercase.
+    assert glossary.apply("He said Sir Ko to me.") == "He said Sir ko to me."
+    # Match is all-lowercase -> replacement returned verbatim in its own casing.
+    assert glossary.apply("He said sir ko to me.") == "He said sir ko to me."

@@ -27,7 +27,7 @@ _STOPWORDS = {
     "has", "had", "will", "would", "can", "could", "should", "just", "okay", "ok", "yeah",
     "um", "uh", "like", "so", "then", "there", "here", "what", "who", "when", "where",
     "why", "how", "up", "down", "out", "about", "into", "very", "also", "than", "too",
-    # Filipino / Tagalog
+    # Filipino
     "ang", "mga", "ng", "sa", "na", "si", "ay", "at", "ito", "iyon", "ko", "mo", "niya",
     "namin", "natin", "ninyo", "nila", "kami", "tayo", "kayo", "sila", "ako", "ikaw", "ka",
     "hindi", "oo", "opo", "po", "din", "rin", "lang", "naman", "kasi", "para", "pero", "o",
