@@ -87,10 +87,19 @@ def _load_models():
     from silero_vad import load_silero_vad
 
     from backend.core.config import settings
+    from backend.database.db import init_db
     from backend.services.audio_service import LoadedModels, load_whisper_model
     from backend.services.diarization_service import load_diarization_model
     from backend.services.glossary_service import load_glossary
     from backend.services.teacher_verification_service import load_verification_model
+
+    # Defensive, not redundant: backend/main.py's lifespan calls this too,
+    # but a standalone worker process (`celery -A backend.worker.celery_app
+    # worker`) started before the API against a fresh SQLite dev DB would
+    # otherwise hit "no such table" the moment a task touches SessionRecord.
+    # A no-op against a Postgres DB Alembic already migrated (checkfirst=True
+    # is create_all()'s default) — see init_db()'s own docstring.
+    init_db()
 
     whisper_model = load_whisper_model()
     glossary = load_glossary()

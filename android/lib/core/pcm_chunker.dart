@@ -24,23 +24,40 @@ import 'wav_encoder.dart';
 /// `chunk_duration_seconds` boundary isn't clipped. The very first chunk of
 /// a session is always sent regardless of its own content — nothing is
 /// ever dropped before the filter has seen anything.
+///
+/// On top of that, [keepAliveInterval] bounds the longest possible gap
+/// between sent chunks: a real classroom can have a genuinely long quiet
+/// stretch (students working silently, a break), and gating every chunk
+/// during it would leave the WebSocket completely idle for that whole
+/// time — long enough for a NAT/carrier/proxy idle-connection timeout to
+/// silently drop it, which the client only discovers via a disconnect
+/// event that ends the session early. Forcing a real (silent) chunk
+/// through periodically keeps the connection demonstrably alive without
+/// any new wire protocol — it's a normal chunk the server already knows
+/// how to handle, just an infrequent one. Default 30s is a heuristic
+/// (common NAT/proxy idle timeouts range from ~30s to a few minutes),
+/// same "unvalidated against a real deployment" caveat this file already
+/// carries for the VAD threshold; pass `null` to disable it entirely.
 class PcmChunker {
   final int sampleRate;
   final int bytesPerSample;
   final int numChannels;
   final Duration chunkDuration;
   final LocalVad vad;
+  final Duration? keepAliveInterval;
 
   Uint8List _buffer = Uint8List(0);
   bool _lastChunkHadSpeech = true;
+  int _chunksSinceLastSend = 0;
 
   PcmChunker({
     this.sampleRate = 16000,
     this.bytesPerSample = 2,
     this.numChannels = 1,
     required this.chunkDuration,
-    this.vad = const LocalVad(),
-  });
+    LocalVad? vad,
+    this.keepAliveInterval = const Duration(seconds: 30),
+  }) : vad = vad ?? LocalVad(sampleRate: sampleRate); // derived, not a bare default — see below
 
   /// Bytes needed for one full chunk at the configured duration/format.
   int get bytesPerChunk {
@@ -54,10 +71,11 @@ class PcmChunker {
   /// Feed one arrived block of raw PCM bytes. Returns zero or more
   /// ready-to-send records (normally 0 or 1; a large input block — e.g.
   /// after a UI hiccup delivers several callbacks' worth at once — can
-  /// complete more than one in a single call). Each record's `shouldSend`
-  /// reflects the VAD + hangover decision for that chunk; `wav` is always
-  /// fully built regardless, so a caller that wants every chunk regardless
-  /// of gating can still get it.
+  /// complete more than one in a single call). `wav` is only ever the real
+  /// wrapped WAV bytes when `shouldSend` is true — building it for a chunk
+  /// that's about to be discarded would be pure waste, since nothing
+  /// currently reads `wav` on a gated-out chunk; it's `Uint8List(0)`
+  /// otherwise.
   List<({Uint8List wav, bool shouldSend})> add(Uint8List data) {
     final combined = Uint8List(_buffer.length + data.length)
       ..setRange(0, _buffer.length, _buffer)
@@ -68,7 +86,7 @@ class PcmChunker {
     var offset = 0;
     while (combined.length - offset >= target) {
       final pcmChunk = combined.sublist(offset, offset + target);
-      chunks.add(_wrapAndGate(pcmChunk));
+      chunks.add(_gate(pcmChunk));
       offset += target;
     }
 
@@ -81,18 +99,28 @@ class PcmChunker {
   /// is empty (e.g. stop landed exactly on a chunk boundary).
   ({Uint8List wav, bool shouldSend})? flush() {
     if (_buffer.isEmpty) return null;
-    final result = _wrapAndGate(_buffer);
+    final result = _gate(_buffer);
     _buffer = Uint8List(0);
     return result;
   }
 
-  ({Uint8List wav, bool shouldSend}) _wrapAndGate(Uint8List pcm) {
+  ({Uint8List wav, bool shouldSend}) _gate(Uint8List pcm) {
     // VAD runs on the raw PCM, never on the already-WAV-wrapped bytes — the
     // 44-byte RIFF header would corrupt the RMS read.
     final hasSpeech = vad.hasSpeech(pcm);
-    final shouldSend = hasSpeech || _lastChunkHadSpeech;
+    var shouldSend = hasSpeech || _lastChunkHadSpeech;
+
+    final keepAlive = keepAliveInterval;
+    if (!shouldSend && keepAlive != null) {
+      final keepAliveChunks = (keepAlive.inMilliseconds / chunkDuration.inMilliseconds).ceil().clamp(1, 1 << 30);
+      if (_chunksSinceLastSend + 1 >= keepAliveChunks) {
+        shouldSend = true; // forced keepalive heartbeat — still real (silent) audio, no new protocol
+      }
+    }
+
     _lastChunkHadSpeech = hasSpeech;
-    return (wav: _wrap(pcm), shouldSend: shouldSend);
+    _chunksSinceLastSend = shouldSend ? 0 : _chunksSinceLastSend + 1;
+    return (wav: shouldSend ? _wrap(pcm) : Uint8List(0), shouldSend: shouldSend);
   }
 
   Uint8List _wrap(Uint8List pcm) => wrapPcm16AsWav(

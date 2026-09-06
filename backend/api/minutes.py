@@ -61,7 +61,11 @@ def _render_minutes(title: str | None, minutes: dict, as_markdown: bool) -> str:
     # .get() throughout below: sessions finalized before teacher_speech_ratio/
     # teacher_speakers/definitions existed won't have these keys.
     teacher_ratio = minutes.get("teacher_speech_ratio")
-    if teacher_ratio:
+    # `is not None`, not a truthy check: a genuinely-computed 0.0 (teacher
+    # enrolled and verification ran, but the teacher never spoke that
+    # session) must render as "0.0%", not be silently dropped and made
+    # indistinguishable from teacher verification never having run at all.
+    if teacher_ratio is not None:
         teacher_speakers = ", ".join(minutes.get("teacher_speakers", [])) or "unidentified"
         lines.append(f"Teacher speech: {round(teacher_ratio * 100, 1)}% ({teacher_speakers})")
 

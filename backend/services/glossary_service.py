@@ -22,7 +22,13 @@ class Glossary:
         # Longest phrase first, so multi-word entries match before any
         # single-word entry inside them would.
         ordered_keys = sorted(terms.keys(), key=len, reverse=True)
-        self._replacements = {key: terms[key] for key in ordered_keys}
+        # Keyed lowercase, matching how _replace_match looks them up (the
+        # match is case-insensitive) — backend/data/glossary.json's own
+        # "_meta" field documents lowercase keys as a convention, but that
+        # was never enforced here: a mixed-case key raised KeyError on every
+        # match. Lowercasing here makes the class correct regardless of the
+        # JSON file's own casing.
+        self._replacements = {key.lower(): terms[key] for key in ordered_keys}
         pattern = "|".join(re.escape(key) for key in ordered_keys)
         self._compiled = re.compile(rf"\b(?:{pattern})\b", re.IGNORECASE) if ordered_keys else None
 

@@ -133,16 +133,22 @@ def clean_audio(input_path: Path, enable_denoise: bool) -> Path:
     denoised_48k_path = input_path.with_name(input_path.stem + "_48k_denoised.wav")
     cleaned_path = input_path.with_name(input_path.stem + "_cleaned.wav")
 
-    _run_ffmpeg_resample(input_path, upsampled_path, RNNOISE_SAMPLE_RATE)
+    # In a `finally`, not just after the last step succeeds: if the second
+    # resample (or RNNoise itself) raises, both intermediate 48kHz files
+    # would otherwise leak to disk permanently — the exact privacy property
+    # CLAUDE.md documents ("temp files cleaned up in finally blocks") this
+    # function itself needs to uphold, not just its callers.
+    try:
+        _run_ffmpeg_resample(input_path, upsampled_path, RNNOISE_SAMPLE_RATE)
 
-    denoiser = RNNoise(sample_rate=RNNOISE_SAMPLE_RATE)
-    for _ in denoiser.denoise_wav(str(upsampled_path), str(denoised_48k_path)):
-        pass
+        denoiser = RNNoise(sample_rate=RNNOISE_SAMPLE_RATE)
+        for _ in denoiser.denoise_wav(str(upsampled_path), str(denoised_48k_path)):
+            pass
 
-    _run_ffmpeg_resample(denoised_48k_path, cleaned_path, SAMPLE_RATE)
-
-    upsampled_path.unlink(missing_ok=True)
-    denoised_48k_path.unlink(missing_ok=True)
+        _run_ffmpeg_resample(denoised_48k_path, cleaned_path, SAMPLE_RATE)
+    finally:
+        upsampled_path.unlink(missing_ok=True)
+        denoised_48k_path.unlink(missing_ok=True)
 
     return cleaned_path
 
@@ -317,43 +323,55 @@ def run_pipeline(
         raise ValueError("enable_teacher_verification=True requires a loaded teacher_verification_model.")
 
     timer = StageTimer()
+    # Both declared before the try so the finally block can safely reference
+    # them even if an exception hits before either is assigned (e.g.
+    # ingest_audio itself raising) — see the finally block below for why
+    # this cleanup can't just run after the last stage the way it used to.
+    standardized_path: Path | None = None
+    cleaned_path: Path | None = None
 
-    with timer.track("preprocess"):
-        standardized_path = ingest_audio(input_path, input_path.with_name(input_path.stem + "_std.wav"))
+    try:
+        with timer.track("preprocess"):
+            standardized_path = ingest_audio(input_path, input_path.with_name(input_path.stem + "_std.wav"))
 
-    with timer.track("denoise"):
-        cleaned_path = clean_audio(standardized_path, enable_denoise)
+        with timer.track("denoise"):
+            cleaned_path = clean_audio(standardized_path, enable_denoise)
 
-    with timer.track("vad"):
-        waveform, speech_segments = detect_speech(cleaned_path, enable_vad, models.silero_vad_model)
+        with timer.track("vad"):
+            waveform, speech_segments = detect_speech(cleaned_path, enable_vad, models.silero_vad_model)
 
-    with timer.track("transcribe"):
-        result = transcribe_audio(models.whisper_model, waveform, speech_segments, models.glossary, beam_size)
+        with timer.track("transcribe"):
+            result = transcribe_audio(models.whisper_model, waveform, speech_segments, models.glossary, beam_size)
 
-    with timer.track("diarization"):
-        if enable_diarization:
-            raw_speaker_segments = diarization_service.diarize_audio(
-                models.diarization_model, cleaned_path, num_speakers=num_speakers
-            )
-            speaker_segments = diarization_service.format_speaker_segments(raw_speaker_segments)
-            result["whisper_segments"] = merge_transcript_with_speakers(result["whisper_segments"], speaker_segments)
-            result["speaker_segments"] = speaker_segments
-        else:
-            result["speaker_segments"] = []
+        with timer.track("diarization"):
+            if enable_diarization:
+                raw_speaker_segments = diarization_service.diarize_audio(
+                    models.diarization_model, cleaned_path, num_speakers=num_speakers
+                )
+                speaker_segments = diarization_service.format_speaker_segments(raw_speaker_segments)
+                result["whisper_segments"] = merge_transcript_with_speakers(result["whisper_segments"], speaker_segments)
+                result["speaker_segments"] = speaker_segments
+            else:
+                result["speaker_segments"] = []
 
-    with timer.track("teacher_verification"):
-        if enable_teacher_verification:
-            result["whisper_segments"] = apply_teacher_verification(
-                result["whisper_segments"], waveform, models.teacher_verification_model, enrolled_teachers or []
-            )
+        with timer.track("teacher_verification"):
+            if enable_teacher_verification:
+                result["whisper_segments"] = apply_teacher_verification(
+                    result["whisper_segments"], waveform, models.teacher_verification_model, enrolled_teachers or []
+                )
 
-    result["stage_latencies"] = timer.latencies
-    result["audio_duration_seconds"] = round(len(waveform) / SAMPLE_RATE, 2)
-
-    # Both intermediate files' only consumers (VAD/transcribe/diarization) have already
-    # run — safe to clean up now. `input_path` itself is the caller's temp file, not ours.
-    if cleaned_path != standardized_path:
-        cleaned_path.unlink(missing_ok=True)
-    standardized_path.unlink(missing_ok=True)
-
-    return result
+        result["stage_latencies"] = timer.latencies
+        result["audio_duration_seconds"] = round(len(waveform) / SAMPLE_RATE, 2)
+        return result
+    finally:
+        # In a finally, not just after the last stage succeeds: any
+        # exception raised above (a corrupt chunk failing VAD, a transient
+        # Whisper error, etc.) used to skip this entirely, leaking
+        # standardized_path/cleaned_path to disk permanently — directly
+        # contradicting CLAUDE.md's documented privacy property that temp
+        # files are always cleaned up regardless of outcome. `input_path`
+        # itself is the caller's temp file, not ours, and isn't touched here.
+        if cleaned_path is not None and cleaned_path != standardized_path:
+            cleaned_path.unlink(missing_ok=True)
+        if standardized_path is not None:
+            standardized_path.unlink(missing_ok=True)
