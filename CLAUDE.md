@@ -42,8 +42,8 @@
 
 | Objective | Status | What's missing |
 |---|---|---|
-| General | Backend built and verified; no client, no fine-tuned model, no real-classroom validation yet | Flutter, fine-tuning run, real-world testing |
-| 1. Capture + process noisy audio | Processing pipeline built and tested on clean lab audio only | Real capture path (Flutter), zero real noisy-classroom audio run through it yet |
+| General | Backend and Flutter client both built and verified end-to-end (emulator); no fine-tuned model, no real-classroom validation yet | Fine-tuning run, real-world testing on a physical device with real classroom audio |
+| 1. Capture + process noisy audio | Processing pipeline built and tested on clean lab audio only; client-side capture path now built and verified on-device (emulator, silent virtual mic) | Zero real noisy-classroom audio run through it yet, on a physical device |
 | 2. Identify + prioritize instructional speech | Both halves now implemented — identification (SpeechBrain ECAPA) and prioritization (teacher-weighted keywords/minutes, `teacher_speech_ratio`) | Threshold uncalibrated against real enrolled-vs-unenrolled data |
 | 3. Multilingual ASR + Hiligaynon fine-tuning + low-resource eval | Whisper integration done; fine-tuning *tooling* ready, adaptation never run; evaluation *tooling* ready, zero real results | The corpus, the training run, the real WER numbers |
 | 4. Structured minutes: key points, topics, definitions, tasks | All four now implemented (`definitions` was the gap, closed this pass) | Precision/recall unmeasured until real classroom audio exists |
@@ -424,7 +424,7 @@ Each segment in `whisper_segments` contains:
 
 ## Known Open Issues
 
-- Flutter WebSocket integration: **unbuilt** — Nathan is building the Flutter screens next; backend endpoints are ready for them to call
+- Flutter WebSocket integration: **built and verified end-to-end on an Android emulator** — see "Flutter Client (Built)" below. Real physical-device testing (as opposed to emulator) is still open.
 - Per-chunk diarization has no cross-chunk speaker continuity (restarts each chunk) — unchanged, still true for streamed WS chunks
 - Ethics/consent clearance for classroom recordings — must resolve before September recordings
 - Whisper first-segment language lock on code-switched speech — known artifact, accepted
@@ -497,11 +497,32 @@ Triggered by an architecture review that found: `async def` routes calling CPU-b
 
 ---
 
+## Flutter Client (Built)
+
+Lives at `android/` (repo root — see "Repo Structure" above; Flutter's own generated native Android glue folder nests inside as `android/android/`, an accepted cosmetic quirk of that layout choice, not a mistake). All six required screens (see "Flutter Screens (Required)") are built against the real backend contract, not a mock — verified via a real end-to-end run on an Android emulator (Pixel_7 AVD, API 37) against the actual FastAPI + Celery + Postgres + Redis stack running on this same dev machine, not just `flutter analyze`/`flutter test` passing in isolation.
+
+- **`lib/core/`** — `api_client.dart` (one method per `backend/api/*.py` endpoint, throws `ApiException`, global 401 → `AuthController.forceLogout()`), `ws_transcribe_client.dart` (drives `/ws/transcribe`'s start/chunk/end/session_ended protocol), `auth_controller.dart`, `settings_controller.dart` (server URL + `PipelineOptions`, persisted via `shared_preferences`), `secure_storage.dart` (JWT only, via `flutter_secure_storage`), `wav_encoder.dart` + `pcm_chunker.dart` (wrap `record` package's headerless PCM16 stream into self-contained WAV chunks per `chunk_duration_seconds` — required because the WS contract needs each binary frame to be a complete WAV file FFmpeg can parse, and `record`'s `startStream()` only emits headerless PCM), `polling.dart` (`pollUntil()`, exponential backoff, used for both whole-file-session and teacher-enrollment status polling).
+- **`lib/models/`** — `pipeline_config.dart` (`Preset.{fast,balanced,accurate}` → `PipelineOptions`, field names matching `backend/schemas/pipeline.py` exactly; `balanced` matches that schema's own defaults), plus `fromJson`/`toJson` models mirroring every other `backend/schemas/` file.
+- **`lib/screens/`** — `auth/` (login/register), `home/` (session library), `enrollment/` (teacher voice enrollment), `recording/` (live recording + subtitles), `transcript/` (search + highlight, client-side substring matching per the backend's "no search endpoint" contract), `minutes/` (structured minutes + export via `share_plus`), `settings/` (server URL, preset selector, advanced panel with outcome-framed labels never raw parameter names, logout).
+- **Tests** (`android/test/`, 48 passing) — pure-Dart unit tests for every piece of logic that doesn't need a device: `pipeline_config_test.dart` (preset values + exact `toJson()` key names — the single highest-risk typo surface in the app), `wav_encoder_test.dart` (RIFF/WAVE/fmt/data header correctness), `pcm_chunker_test.dart` (chunk sizing, remainder-carry, flush), model `fromJson` parsing against literal fixtures (including missing-optional-field cases), `ws_messages_test.dart`, `polling_test.dart`.
+- **CI** — `.github/workflows/ci.yml` gained a second `flutter` job (`flutter pub get && flutter analyze && flutter test`), pinned to the exact Flutter version this was built against rather than floating `stable`.
+
+**Verified for real, on-device, this session** (not just unit tests): register → login (JWT persists across app restart, confirmed by killing and relaunching the app) → teacher voice enrollment (real mic recording via `record`, real multipart upload, real SpeechBrain embedding extraction via the Celery worker, real `pollUntil()` backoff visible in the request log, ends in a green "Ready" badge) → live recording (`WS /ws/transcribe`, real mic streaming, ~2 dozen chunks actually processed by the worker over several minutes without dropping the connection) → stop → session finalizes server-side (`status: "completed"`) → Transcript screen loads the real session. Settings screen's preset/slider values were confirmed to exactly reflect `PipelinePresets.balanced` (beam 5, chunk 3s) as rendered on-screen, not just in code.
+
+**One real bug found and fixed by this on-device run, not by the unit tests**: the WS's `onDone` handler fired on the *graceful* closure that follows a successful `session_ended` (the server closes the socket right after sending it), racing the screen's own navigation to the Transcript screen and occasionally popping back over it — `_wsClient.close()` is now called (marking the closure as intentional) the moment `session_ended` arrives, before navigating. This is exactly the kind of timing bug unit tests over pure logic can't catch; only running the real WS round-trip against the real backend surfaced it.
+
+**Known gaps, not oversights**:
+- Tested on the Android **emulator**, not a physical device — real classroom deployment needs a phone on the same Wi-Fi as the backend, which the Settings screen's editable server-address field supports (`10.0.2.2` is emulator-only; a physical device needs the host's real LAN IP) but which hasn't itself been exercised.
+- The emulator's virtual microphone is silent, so no real classroom audio has been transcribed through the client yet — VAD correctly returned "no speech detected" throughout testing rather than hallucinating, which is the correct behavior for silence, but it means transcription accuracy on real speech through the *client* (as opposed to through `scripts/`, already covered by backend tests) is unverified.
+- "Import audio file" (`POST /transcribe`'s whole-file path) has no UI — deliberately descoped, not one of the six required screens; noted in `docs/future_ideas.md`.
+- Session list swipe-to-delete, the Minutes screen with real (non-empty) content, and transcript search/highlight against real multi-segment text were code-reviewed but not exercised on-device this session (no session with actual detected speech existed yet to view).
+
+---
+
 ## Current Build Priority — superseded, see below
 
-The original 14-day sprint list (items 1–4, 8, 9, 11) is done — see "Backend (Built)" and the four "Resolved this pass" rounds above. **All backend/code work is done as of round 4.** Everything genuinely still open from here is either Nathan's own work or blocked on real-world data/people, not more backend code:
+The original 14-day sprint list (items 1–4, 8, 9, 11) is done — see "Backend (Built)" and the four "Resolved this pass" rounds above. **All backend/code work is done as of round 4. The Flutter client is now built too — see "Flutter Client (Built)" below.** Everything genuinely still open from here is either Nathan's own work or blocked on real-world data/people, not more code:
 
-- **Flutter** (all 6 screens — home/library, teacher enrollment, live recording+subtitles, transcript view, minutes view+export, settings) — Nathan's, not started. Every endpoint it needs is built and tested; `scripts/v2_smoke_test.py` shows the exact request/response shapes.
 - **Ethics/consent clearance** — Nathan's, blocks all real classroom recording.
 - **Real classroom data collection** (Nathan + Andrei + Dan Joseph) — blocks everything below.
 - **Fine-tuning run** — `ai/finetuning/` is a tested, ready scaffold with zero trained checkpoints; needs the corpus above.
