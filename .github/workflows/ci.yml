@@ -67,3 +67,30 @@ jobs:
 
       - name: Run test suite
         run: pytest tests/ -v
+
+  flutter:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: android
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to the exact version this project was built and verified
+      # against (`flutter --version` in the dev environment), rather than
+      # floating `channel: stable` — avoids spurious CI-only failures from
+      # a newer stable release landing between runs.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.2'
+          channel: stable
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Run test suite
+        run: flutter test
