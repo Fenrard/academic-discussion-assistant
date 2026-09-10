@@ -75,6 +75,11 @@ class _MinutesScreenState extends State<MinutesScreen> {
     } on ApiException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Export failed: ${e.message}')));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Export failed — can't reach the server.")),
+      );
     } finally {
       if (mounted) setState(() => _isExporting = false);
     }

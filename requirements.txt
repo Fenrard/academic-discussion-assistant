@@ -18,7 +18,10 @@ torch
 torchaudio
 silero-vad
 pyannote.audio
-pyrnnoise        # optional: RNNoise denoising, may not build cleanly on Windows (enable_denoise=False skips it)
+# denoise (enable_denoise) is FFmpeg's afftdn filter now — no Python package. The old pyrnnoise/RNNoise
+# dependency was dropped after pyrnnoise 0.4.3 broke against every installable audiolab/PyAV combination
+# (docs/paper-vs-implementation.md §3.3). scripts/process_pipeline.py (a frozen pre-backend dev utility)
+# still imports pyrnnoise for its own --denoise path; `pip install pyrnnoise` by hand if you need that.
 speechbrain       # optional: teacher verification (ECAPA-TDNN), enable_teacher_verification=False skips it
 
 # --- Backend API ---

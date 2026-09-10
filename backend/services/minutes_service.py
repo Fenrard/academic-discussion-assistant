@@ -216,10 +216,18 @@ def generate_minutes(
     segments: list[dict],
     keywords: list[str],
     topic_gap_seconds: float | None = None,
+    total_duration_seconds: float | None = None,
 ) -> dict:
     """
     Builds the structured minutes dict stored on SessionRecord.minutes
     and returned by GET /sessions/{id}/minutes.
+
+    total_duration_seconds, when given, is the session's authoritative
+    length (SessionRecord.duration_seconds — the sum of every processed
+    chunk's audio duration). Preferred over the fallback of "end time of
+    the last transcript segment", which undercounts by any trailing
+    silence after the last speech and, on a streamed session, sits on the
+    gated-silence-compressed timeline rather than wall-clock.
     """
     gap = topic_gap_seconds if topic_gap_seconds is not None else settings.topic_gap_seconds
     blocks = _group_into_topics(segments, gap)
@@ -234,9 +242,14 @@ def generate_minutes(
         for block in blocks
     ]
 
+    if total_duration_seconds is not None:
+        duration_seconds = round(total_duration_seconds, 2)
+    else:
+        duration_seconds = round(segments[-1]["end"], 2) if segments else 0.0
+
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "duration_seconds": round(segments[-1]["end"], 2) if segments else 0.0,
+        "duration_seconds": duration_seconds,
         "participants": _participants(segments),
         "teacher_speech_ratio": _teacher_speech_ratio(segments),
         "teacher_speakers": _teacher_speakers(segments),

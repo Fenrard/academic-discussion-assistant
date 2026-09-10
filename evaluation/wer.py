@@ -144,6 +144,16 @@ def main() -> None:
     except OSError as error:
         print(f"Error: {error}")
         sys.exit(1)
+    except UnicodeDecodeError as error:
+        # A real risk once actual reference transcripts exist: a human
+        # typing Hiligaynon/Filipino/English text on Windows (Notepad's
+        # default save encoding is the system ANSI codepage, not UTF-8) can
+        # easily produce a file that isn't valid UTF-8. UnicodeDecodeError
+        # is a ValueError subclass, not an OSError, so it fell straight
+        # through as an unhandled traceback before this clause existed.
+        print(f"Error: could not decode a transcript file as UTF-8 ({error}). "
+              f"Re-save both files with UTF-8 encoding (e.g. Notepad's Save As > Encoding: UTF-8).")
+        sys.exit(1)
 
     result = compute_error_rates(reference_text, hypothesis_text)
     report_path = write_report({"reference_file": str(reference_path), "hypothesis_file": str(hypothesis_path), **result})

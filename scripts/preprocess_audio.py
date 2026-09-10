@@ -6,7 +6,16 @@ import json
 
 from pathlib import Path
 
-SUPPORTED_EXTENSIONS = (".wav", ".mp3", ".m4a",".ogg",".webm",".flac",".aac")
+# Kept in sync with backend/services/audio_service.py's copy of this
+# constant. Includes real phone-recorder/video-container formats (.3gp,
+# .amr, .mp4, .mov, etc.) beyond the original studio-ish list, since a real
+# classroom recording could plausibly arrive in any of these -- FFmpeg
+# demuxes by sniffing actual file content, not this extension, so this list
+# only gates what we accept, never what FFmpeg can actually decode.
+SUPPORTED_EXTENSIONS = (
+    ".wav", ".mp3", ".m4a", ".ogg", ".webm", ".flac", ".aac",
+    ".3gp", ".3gpp", ".amr", ".mp4", ".mov", ".opus", ".wma",
+)
 TARGET_SAMPLE_RATE = 16000
 TARGET_CHANNELS = 1
 DEFAULT_OUTPUT_FILENAME = "lecture_preprocessed.wav"
@@ -53,10 +62,16 @@ def inspect_audio(input_path: Path) -> dict:
     if audio_stream is None:
         raise ValueError(f"No audio stream found in '{input_path.name}'.")
 
+    # Most containers this script accepts (wav/mp3/m4a/ogg) populate
+    # format.duration, but some (certain .webm/.opus captures in particular)
+    # only populate it on the audio stream itself -- falling back there
+    # avoids silently reporting "0.00 seconds" for a real, playable file.
+    duration = probe_data["format"].get("duration") or audio_stream.get("duration") or 0.0
+
     return {
         "filename": input_path.name,
         "codec": audio_stream.get("codec_name", "unknown"),
-        "duration_seconds": float(probe_data["format"].get("duration", 0.0)),
+        "duration_seconds": float(duration),
         "sample_rate": int(audio_stream.get("sample_rate", 0)),
         "channels": audio_stream.get("channels", "unknown"),
         "bitrate": probe_data["format"].get("bit_rate", "unknown"),

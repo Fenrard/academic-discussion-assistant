@@ -108,18 +108,27 @@ class ApiClient {
 
   Future<String> exportMinutes(String sessionId, {String format = 'markdown'}) async {
     final response = await _http.get(_uri('/sessions/$sessionId/minutes/export', {'format': format}), headers: _authHeader);
-    _handle(response);
+    // This endpoint returns markdown/plain text, not JSON — it must NOT go
+    // through _handle(), whose 2xx branch runs jsonDecode() on the body and
+    // would throw a FormatException on every *successful* export.
+    _ensureOk(response);
     return response.body;
   }
 
   // --- Shared response handling ---
 
   /// Returns the decoded body on 2xx; throws [ApiException] otherwise and
-  /// fires [onUnauthorized] on 401. The one place every call funnels through.
+  /// fires [onUnauthorized] on 401. The one place every JSON call funnels through.
   dynamic _handle(http.Response response) {
-    if (response.statusCode >= 200 && response.statusCode < 300) {
-      return response.body.isEmpty ? null : jsonDecode(response.body);
-    }
+    _ensureOk(response);
+    return response.body.isEmpty ? null : jsonDecode(response.body);
+  }
+
+  /// Status-only check: fires [onUnauthorized] on 401 and throws
+  /// [ApiException] on any non-2xx, without touching the body. Used directly
+  /// by the one endpoint (minutes export) whose success body isn't JSON.
+  void _ensureOk(http.Response response) {
+    if (response.statusCode >= 200 && response.statusCode < 300) return;
 
     String message = 'Request failed (${response.statusCode}).';
     try {

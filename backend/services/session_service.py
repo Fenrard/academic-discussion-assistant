@@ -38,6 +38,11 @@ def create_session(
     return session
 
 
+def _shift(segment: dict, offset: float) -> dict:
+    """A copy of `segment` with start/end moved onto the session timeline."""
+    return {**segment, "start": round(segment["start"] + offset, 2), "end": round(segment["end"] + offset, 2)}
+
+
 def materialize_transcript(chunk_results: dict) -> dict:
     """
     Rebuilds transcript_text/transcript_segments/speaker_segments from
@@ -47,15 +52,30 @@ def materialize_transcript(chunk_results: dict) -> dict:
     finish) contribute nothing to the visible transcript until chunk 1
     arrives and closes the gap. duration_seconds and stage_latencies
     ARE order-independent (a sum), so those count every completed chunk.
+
+    Each streamed chunk is transcribed as its own standalone audio unit,
+    so its whisper/speaker segment timestamps come back chunk-relative
+    (0-based). They're shifted here onto the session timeline by the
+    summed audio duration of every preceding contiguous chunk — without
+    this every chunk's segments restack at 0..Ns and the transcript view
+    and the minutes topic-grouping both see one giant pile of overlapping
+    segments. Client-side VAD gating drops silent chunks before they're
+    ever sent, so a gated stream's timeline is "elapsed sent audio", not
+    wall-clock — exact when nothing was gated, compressed by the gated
+    silence otherwise. The whole-file path has a single chunk (index 0)
+    whose segments are already whole-file-absolute, and offset 0 leaves
+    them untouched.
     """
     text_parts, segments, speaker_segments = [], [], []
     index = 0
+    running_offset = 0.0
     while str(index) in chunk_results:
         chunk = chunk_results[str(index)]
         if chunk["text"]:
             text_parts.append(chunk["text"])
-        segments.extend(chunk["whisper_segments"])
-        speaker_segments.extend(chunk.get("speaker_segments", []))
+        segments.extend(_shift(seg, running_offset) for seg in chunk["whisper_segments"])
+        speaker_segments.extend(_shift(sp, running_offset) for sp in chunk.get("speaker_segments", []))
+        running_offset += chunk["audio_duration_seconds"]
         index += 1
 
     total_duration = sum(chunk["audio_duration_seconds"] for chunk in chunk_results.values())
@@ -132,7 +152,9 @@ def finalize_session(db: DbSession, session: SessionRecord) -> SessionRecord:
     session.keywords = keywords
 
     if session.transcript_segments:
-        session.minutes = generate_minutes(session.transcript_segments, keywords)
+        session.minutes = generate_minutes(
+            session.transcript_segments, keywords, total_duration_seconds=session.duration_seconds
+        )
     else:
         session.minutes = None
 

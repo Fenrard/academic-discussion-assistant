@@ -48,6 +48,21 @@ router = APIRouter(tags=["transcribe"])
 _RESULT_POLL_INTERVAL_SECONDS = 0.5
 
 
+def _suffix_from_filename(filename: str | None) -> str:
+    """
+    Derives the temp-file suffix write_temp_audio() saves an upload under.
+    Falls back to ".wav" both when there's no filename/extension at all AND
+    when the extension is empty (a filename ending in a bare "." — "." in
+    the name but rsplit(...)[-1] yields ""), which used to produce a bogus
+    "." suffix that ingest_audio()'s SUPPORTED_EXTENSIONS check would reject
+    outright. FFmpeg sniffs actual content on decode regardless of this
+    suffix, so a wrong-but-supported fallback never affects correctness —
+    it only ever affects whether the upload gets a fair chance at all.
+    """
+    extension = filename.rsplit(".", 1)[-1] if filename and "." in filename else ""
+    return f".{extension}" if extension else ".wav"
+
+
 @router.post("/transcribe", status_code=202)
 @limiter.limit(settings.rate_limit_transcribe)
 async def transcribe_file(
@@ -78,7 +93,7 @@ async def transcribe_file(
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error))
 
-    suffix = "." + file.filename.rsplit(".", 1)[-1] if file.filename and "." in file.filename else ".wav"
+    suffix = _suffix_from_filename(file.filename)
     temp_path = write_temp_audio(await file.read(), suffix=suffix)
 
     enrolled_teachers = (
@@ -194,6 +209,18 @@ async def transcribe_stream(websocket: WebSocket, db: DbSession = Depends(get_db
         await asyncio.gather(receive_chunks(), listen_results())
     except WebSocketDisconnect:
         state["disconnected"] = True
+    except Exception as error:
+        # e.g. the pub/sub backend (Redis) is unreachable — listen_results()
+        # can't even subscribe. Without this the connection just drops with no
+        # close frame and the client sees a raw ConnectionClosedError; send one
+        # clean error frame and mark the session interrupted like any other
+        # mid-session failure.
+        state["disconnected"] = True
+        try:
+            await websocket.send_json({"type": "error", "detail": f"Streaming backend error: {error}"})
+            await websocket.close()
+        except Exception:
+            pass
     finally:
         if state["disconnected"] and session.status == "in_progress":
             session.status = "interrupted"

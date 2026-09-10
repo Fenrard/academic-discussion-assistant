@@ -47,6 +47,33 @@ def test_materialize_transcript_in_order():
     assert result["duration_seconds"] == 6.0
 
 
+def test_materialize_transcript_shifts_chunk_relative_timestamps_onto_the_session_timeline():
+    # Each streamed chunk is transcribed standalone, so its segments come back
+    # 0-based. Before the shift, chunk 1's segment was [0.0, 3.0] just like
+    # chunk 0's -- every chunk's transcript restacked at zero, so the transcript
+    # view and minutes topic-grouping saw one pile of overlapping segments.
+    chunk_results = {"0": _chunk("hello", duration=3.0), "1": _chunk("world", duration=3.0)}
+    result = materialize_transcript(chunk_results)
+    starts = [(s["start"], s["end"]) for s in result["transcript_segments"]]
+    assert starts == [(0.0, 3.0), (3.0, 6.0)]
+
+
+def test_materialize_transcript_shift_is_a_noop_for_a_single_whole_file_chunk():
+    # The whole-file path (transcribe_file_task) stores one chunk whose segments
+    # are already whole-file-absolute from VAD over the entire file -- offset 0
+    # must leave them exactly as they are.
+    only_chunk = {
+        "text": "whole file",
+        "language": "en",
+        "whisper_segments": [{"start": 4.2, "end": 9.8, "text": "whole file"}],
+        "speaker_segments": [],
+        "audio_duration_seconds": 12.0,
+        "stage_latencies": {},
+    }
+    result = materialize_transcript({"0": only_chunk})
+    assert [(s["start"], s["end"]) for s in result["transcript_segments"]] == [(4.2, 9.8)]
+
+
 def test_materialize_transcript_stops_at_first_gap():
     # Chunk 1 hasn't landed yet (a distributed worker pool finished 0 and 2 first) —
     # the visible transcript must stay at just chunk 0, not skip ahead to include 2.

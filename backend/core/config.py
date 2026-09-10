@@ -31,10 +31,13 @@ class Settings:
     whisper_model_size: str = os.environ.get("WHISPER_MODEL_SIZE", "small")
     whisper_device: str = os.environ.get("WHISPER_DEVICE", "cpu")
     whisper_compute_type: str = os.environ.get("WHISPER_COMPUTE_TYPE", "int8")
+    # 0 = CTranslate2's own default. Set to the host's physical core count for
+    # a single-worker (--concurrency=1) deployment; leave 0 when running a
+    # multi-process worker pool so the cores aren't oversubscribed.
+    whisper_cpu_threads: int = int(os.environ.get("WHISPER_CPU_THREADS", "0"))
 
     # --- Audio ---
     sample_rate: int = 16000
-    rnnoise_sample_rate: int = 48000
     min_chunk_duration_seconds: float = 1.0
     max_chunk_duration_seconds: float = 10.0
 
@@ -63,9 +66,15 @@ class Settings:
     # --- Celery / Redis (async inference — see backend/worker/) ---
     # Unset -> CELERY_TASK_ALWAYS_EAGER, tasks run inline with no broker needed
     # (this sandbox's local/test default). Set both for real horizontal scaling.
+    # 127.0.0.1, not "localhost": on a dual-stack host (Windows 11, and any
+    # Linux box with IPv6 enabled) "localhost" resolves to ::1 first, and if
+    # Redis/Memurai only listens on IPv4 the async client eats a multi-second
+    # stall — or an outright connect timeout — on every connection while the
+    # ::1 attempt is refused. A real deployment overrides these with the
+    # service hostname anyway (deployment/docker-compose.yml -> redis://redis).
     celery_broker_url: str | None = os.environ.get("CELERY_BROKER_URL")
     celery_result_backend: str | None = os.environ.get("CELERY_RESULT_BACKEND", celery_broker_url)
-    redis_url: str = os.environ.get("REDIS_URL", celery_broker_url or "redis://localhost:6379/0")
+    redis_url: str = os.environ.get("REDIS_URL", celery_broker_url or "redis://127.0.0.1:6379/0")
 
     # --- Rate limiting / upload limits ---
     max_upload_bytes: int = int(os.environ.get("MAX_UPLOAD_BYTES", str(200 * 1024 * 1024)))  # 200MB
