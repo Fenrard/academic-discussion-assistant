@@ -94,7 +94,14 @@ def extract_keywords(text: str, top_n: int = 10) -> list[str]:
             else:
                 graph.add_edge(token, neighbor, weight=1)
 
-    scores = nx.pagerank(graph, weight="weight")
+    try:
+        scores = nx.pagerank(graph, weight="weight", max_iter=200)
+    except nx.PowerIterationFailedConvergence:
+        # PageRank very rarely fails to converge on a natural-text co-occurrence
+        # graph, but if it does, a session must still finalize — fall back to
+        # weighted degree centrality (same "central tokens" idea, no iteration).
+        scores = {node: deg for node, deg in graph.degree(weight="weight")}
+
     ranked_words = sorted(scores, key=scores.get, reverse=True)
     top_words = set(ranked_words[: max(top_n * 2, 10)])
 

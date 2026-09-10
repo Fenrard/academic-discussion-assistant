@@ -36,6 +36,15 @@ def test_apply_handles_empty_text():
     assert glossary.apply("") == ""
 
 
+def test_empty_or_whitespace_keys_are_ignored_not_matched_everywhere():
+    # Regression: an "" key escapes to an empty regex alternative, and
+    # `\b(?:...|)\b` matches the zero-width position at every word boundary,
+    # so sub() would splice the replacement in all over the text.
+    glossary = Glossary({"": "BOOM", "   ": "BOOM", "ilonggo": "Ilonggo"})
+    assert glossary.apply("she speaks ilonggo daily") == "she speaks Ilonggo daily"
+    assert "BOOM" not in glossary.apply("plain sentence with no glossary terms")
+
+
 def test_apply_does_not_crash_on_a_mixed_case_glossary_key():
     # Regression test: _replacements used to keep the JSON's original-case
     # keys while _replace_match looked them up lowercased, so any key that

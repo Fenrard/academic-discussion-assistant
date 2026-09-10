@@ -14,7 +14,12 @@ from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from backend.core.config import settings
 
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
-engine = create_engine(settings.database_url, connect_args=connect_args)
+# pool_pre_ping: a Postgres connection idle past the server's timeout (or
+# dropped by a restart / network blip) is transparently discarded and
+# reopened on next use, instead of failing that one request with a stale-
+# connection OperationalError. Cheap (one round-trip on checkout), and a
+# no-op that costs nothing meaningful on SQLite.
+engine = create_engine(settings.database_url, connect_args=connect_args, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 

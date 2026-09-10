@@ -67,6 +67,11 @@ class _HomeScreenState extends State<HomeScreen> {
     } on ApiException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not delete session: ${e.message}')));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Could not delete session — can't reach the server.")),
+      );
     }
   }
 
@@ -97,7 +102,7 @@ class _HomeScreenState extends State<HomeScreen> {
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
           await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const LiveRecordingScreen()));
-          _load();
+          if (mounted) _load();  // a 401 during recording can force-logout and dispose this screen mid-await
         },
         icon: const Icon(Icons.mic),
         label: const Text('New session'),
