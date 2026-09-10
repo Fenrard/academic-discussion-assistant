@@ -47,7 +47,7 @@
 | 2. Identify + prioritize instructional speech | Both halves now implemented — identification (SpeechBrain ECAPA) and prioritization (teacher-weighted keywords/minutes, `teacher_speech_ratio`) | Threshold uncalibrated against real enrolled-vs-unenrolled data |
 | 3. Multilingual ASR + Hiligaynon fine-tuning + low-resource eval | Whisper integration done; fine-tuning *tooling* ready, adaptation never run; evaluation *tooling* ready, zero real results | The corpus, the training run, the real WER numbers |
 | 4. Structured minutes: key points, topics, definitions, tasks | All four now implemented (`definitions` was the gap, closed this pass) | Precision/recall unmeasured until real classroom audio exists |
-| 5. Technical evaluation (accuracy, teacher-ID, latency) | Instrumentation complete and proven (`evaluation/`) | The evaluation itself — real numbers for the manuscript — is unrun |
+| 5. Technical evaluation (accuracy, teacher-ID, latency) | Instrumentation complete and proven (`evaluation/`); real per-stage latency + RTF measured on lab audio (round 8) | WER/CER and teacher-ID accuracy still need real classroom audio + human-labeled ground truth; latency on *real* (noisy, long) audio + on target hardware still pending |
 | 6. Usability evaluation | Standard SUS scoring math only | No instrument for "perceived usefulness"/"perceived comprehension support" beyond generic SUS yet; needs the finished app + real respondents |
 
 Objectives 2 and 4 were the two gaps where the code didn't yet match what this list actually says — both closed; see "Resolved this pass, round 4" further down.
@@ -70,7 +70,7 @@ Objectives 2 and 4 were the two gaps where the code didn't yet match what this l
 | Transport | WebSocket — streaming, chunked (2–5s chunks) |
 | Backend | FastAPI |
 | Middle layer | `backend/services/audio_service.py` |
-| Noise suppression | `pyrnnoise` library (48kHz round-trip via FFmpeg) |
+| Noise suppression | FFmpeg `afftdn` (FFT denoise) filter — was `pyrnnoise`, see "Noise suppression — actual implementation" |
 | VAD | Silero VAD |
 | Speaker verification | SpeechBrain ECAPA-TDNN (cosine similarity) |
 | Diarization | pyannote.audio (optional) |
@@ -91,7 +91,7 @@ Objectives 2 and 4 were the two gaps where the code didn't yet match what this l
 Flutter (WebSocket chunks)
   → FastAPI
     → FFmpeg normalize + loudnorm (ALWAYS ON, never optional)
-    → pyrnnoise denoising (48kHz round-trip) [enable_denoise toggle]
+    → FFmpeg afftdn denoising (in place at 16kHz) [enable_denoise toggle]
     → Silero VAD          [enable_vad toggle]
     → Faster-Whisper transcription
     → Glossary refinement (applied per-segment, right after transcription)
@@ -104,7 +104,7 @@ Flutter (WebSocket chunks)
 ```
 
 **Toggle flags:**
-- `enable_denoise` — pyrnnoise denoising (opt-in, off by default)
+- `enable_denoise` — FFmpeg `afftdn` denoising (opt-in, off by default)
 - `enable_vad` — Silero VAD (False = one synthetic whole-file segment returned)
 - `enable_diarization` — pyannote (optional/nice-to-have)
 - `enable_teacher_verification` — SpeechBrain ECAPA cosine similarity
@@ -188,7 +188,7 @@ These are dev utilities. Their logic gets promoted into `backend/services/` — 
 ## Data Flow
 
 ```
-Android (local RMS VAD gate) → FastAPI → Audio Service → RNNoise → Silero
+Android (local RMS VAD gate) → FastAPI → Audio Service → afftdn denoise → Silero
 → Whisper → Diarization → Teacher Verification → Database → JSON → Android
 ```
 
@@ -266,7 +266,7 @@ already working.
 - Server (FastAPI): diarization, teacher verification, Whisper transcription — unchanged, fully server-side
 - **Graceful degradation when offline:** still NOT built. A local-record-then-sync fallback needs local storage, a background sync/retry mechanism, and its own UI state — a genuinely larger feature than the VAD pre-filter above, left open.
 - Benchmark full pipeline on actual target hardware — isolate model inference vs integration overhead before wiring into Flutter — still open
-- If local pipeline too slow: push diarization/verification to server path, keep VAD+RNNoise local — the VAD half of this is now real; the RNNoise half remains the open half
+- If local pipeline too slow: push diarization/verification to server path, keep VAD+denoise local — the VAD half of this is now real; on-device denoise is still server-side only (`afftdn` runs in the worker)
 
 ---
 
@@ -325,7 +325,7 @@ already working.
 - **HF_TOKEN:** required for pyannote (Hugging Face gated model) — set per session with `$env:HF_TOKEN = "your_token"` or permanently via `setx`
 - **JWT_SECRET_KEY:** required to run the API (auth can't sign tokens without it) — any value works for dev (`$env:JWT_SECRET_KEY = "dev-only-secret"`); generate a real one with `python -c "import secrets; print(secrets.token_hex(32))"` for anything beyond local dev. In `ENVIRONMENT=production` the API refuses to start without it.
 - **PostgreSQL 17:** installed natively (Windows service `postgresql-x64-17`, auto-starts). Dev database: `scaitale` / user `scaitale` / password `scaitale_dev_password` → `$env:DATABASE_URL = "postgresql+psycopg://scaitale:scaitale_dev_password@localhost:5432/scaitale"`. Optional — SQLite is the default when `DATABASE_URL` is unset, and `pytest` needs no infra at all.
-- **Memurai (Redis-compatible):** installed natively (Windows service `Memurai`, auto-starts) at `redis://localhost:6379/0` — set `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND`/`REDIS_URL` to it to run a real separate worker (`celery -A backend.worker.celery_app worker --pool=solo` — `--pool=solo` is required on Windows, prefork needs fork()). Also optional — no broker configured means Celery's eager mode runs tasks inline in the API process.
+- **Memurai (Redis-compatible):** installed natively (Windows service `Memurai`, auto-starts) at `redis://127.0.0.1:6379/0` — set `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND`/`REDIS_URL` to it to run a real separate worker (`celery -A backend.worker.celery_app worker --pool=solo` — `--pool=solo` is required on Windows, prefork needs fork()). Also optional — no broker configured means Celery's eager mode runs tasks inline in the API process. **Use `127.0.0.1`, not `localhost`** — on this dual-stack Windows host `localhost` resolves to IPv6 `::1` first, which Memurai doesn't listen on, so `redis.asyncio` (the WS pub/sub client) eats a ~2s stall or an outright connect timeout per connection before falling back to IPv4. `backend/core/config.py`'s default was changed to `127.0.0.1` for the same reason.
 - **Manual smoke tests:** `scripts/v2_smoke_test.py` (full REST+WS walkthrough: register → login → async transcribe+poll → teacher enrollment → WS streaming → /metrics) and `scripts/ws_smoke_test.py` (WS-only) — both expect a server already running on port 8000; both end in an explicit pass/fail. Dev utilities like the six scripts, not app code.
 - **Python standard:** no argparse or CLI concerns inside importable functions — CLI entry points are thin wrappers only
 
@@ -358,13 +358,14 @@ From `process_pipeline.py` CLI flags (for reference):
 
 ---
 
-### RNNoise — actual implementation
-- Uses `pyrnnoise` library, **NOT** FFmpeg `arnndn` filter — this is a deliberate deviation from the manuscript's own Software Stack section, which describes RNNoise "applied through FFmpeg's arnndn filter." See `docs/paper-vs-implementation.md` for why `pyrnnoise` was kept over `arnndn` and what to change in the manuscript text.
-- Requires a 48kHz round-trip: upsample (ffmpeg) → `RNNoise.denoise_wav()` → downsample back to 16kHz (ffmpeg)
-- `RNNOISE_SAMPLE_RATE = 48000`, `SAMPLE_RATE = 16000`
-- Two temp files created (`_48k.wav`, `_48k_denoised.wav`) and cleaned up after
-- `pyrnnoise` must be installed: `pip install pyrnnoise`
-- `enable_denoise=False` (default) — opt-in, not opt-out
+### Noise suppression — actual implementation
+- **FFmpeg `afftdn` (FFT denoise) filter**, applied in place at 16kHz — `backend/services/audio_service.py: clean_audio()`, filter string `DENOISE_FILTER = "afftdn=nr=12:nf=-25:tn=1"`. One `subprocess.run` call, no resample round-trip, no Python dependency, ~0.1s/chunk.
+- **Was `pyrnnoise` (RNNoise, 48kHz round-trip).** Dropped after `pyrnnoise` 0.4.3 broke against every installable `audiolab`/`PyAV` combo on Python 3.11 (`ResolutionImpossible` to downgrade — `faster-whisper` needs `av>=11` and old `av` has no py3.11 wheels). PM decision this pass. See `docs/paper-vs-implementation.md` §3.3 and "Resolved this pass, round 8" below.
+- The paper says "RNNoise... applied through FFmpeg's `arnndn` filter" — `afftdn` is a *different* FFmpeg filter (FFT vs. RNN), but stays within the paper's "applied through FFmpeg" framing. Manuscript wording to update accordingly; if the RNNoise name must be kept, `arnndn` + a committed `.rnnn` model file is the fallback (rejected here for zero-setup portability).
+- `nf=-25` (noise floor, raised from the -50 default — classroom ambient sits above near-silence) and `tn=1` (track non-stationary noise) are an **unvalidated heuristic default**, same caveat as `teacher_verification_threshold`. Tune against real noisy classroom audio once it exists.
+- One temp file (`_cleaned.wav`), cleaned up in `run_pipeline()`'s `finally` (and in `clean_audio`'s own failure path).
+- `enable_denoise=False` (default) — opt-in, not opt-out. Covered by `tests/test_audio_denoise.py`.
+- `scripts/process_pipeline.py` (frozen pre-backend dev utility) still has the old `pyrnnoise` `clean_audio` — also broken, not fixed (scripts are frozen per this file's rule); `pip install pyrnnoise` by hand if you need that script's `--denoise`.
 
 ### Waveform loading — soundfile not torchaudio
 - `_load_waveform()` uses `soundfile` (`sf.read()`) instead of `silero_vad`'s `read_audio()`
@@ -387,7 +388,7 @@ Each segment in `whisper_segments` contains:
 
 ### process_pipeline.py CLI flags (complete)
 - `audio_file` — positional, path to preprocessed 16kHz mono WAV
-- `--denoise` — enable RNNoise (off by default)
+- `--denoise` — enable denoising (off by default; backend uses `afftdn`, the frozen script still references `pyrnnoise`)
 - `--no-vad` — skip Silero VAD
 - `--diarize` — enable pyannote diarization
 - `--hf-token` — Hugging Face token (or set `HF_TOKEN` env var)
@@ -445,7 +446,7 @@ Each segment in `whisper_segments` contains:
 - Fine-tuning (`ai/finetuning/`) is a complete, tested-importable scaffold, not a trained model — it has no corpus to train on yet (`datasets/processed/` is empty pending the team's recording + transcription pass) and has never actually been run end-to-end
 - SUS scoring (`evaluation/sus.py`) has no respondents yet — it's the scoring math only, per CLAUDE.md's "with actual respondents" still needing actual respondents
 - `POST /transcribe`'s whole-file path assumes the API and worker containers share a filesystem/volume (see `deployment/docker-compose.yml`'s `shared-tmp` volume) — object storage (S3-compatible) is the properly distributed fix, not yet built (no infra here to build it against)
-- No load testing has been done — the worker-pool/async rearchitecture is correct-by-construction and unit/integration tested under real Postgres+Redis, but its actual throughput under concurrent load is unmeasured
+- Light concurrency testing done (round 8: 6 parallel WS sessions × 3 chunks against the real worker + Postgres, all clean, no lost updates) — but not sustained *load* testing (dozens of concurrent sessions, hours-long sessions, many workers). Measured single-worker streaming RTF ≈ 2.4–2.9 (Whisper `small` int8 CPU): the pipeline is slower than real-time, so a live session's transcript lags and finalizes minutes after "stop" unless `--concurrency`/worker count is scaled to the offered chunk rate. This is a model/hardware reality, not a bug — GPU or a fine-tuned smaller model is the real lever; `WHISPER_CPU_THREADS` gives ~17%.
 - Docker images themselves (not just CI's postgres/redis service containers) have never been built and run as actual containers — `deployment/docker-compose.yml` is written to spec and CI-adjacent-verified only
 
 **Resolved this pass** (were unbuilt, now built — see "Backend (Built)" below): SpeechBrain ECAPA teacher verification, FastAPI endpoints (POST + WebSocket), transcript persistence, glossary post-processing, TextRank + rule-based minutes, `evaluation/wer.py` + `evaluation/latency.py`.
@@ -478,10 +479,19 @@ Each segment in `whisper_segments` contains:
 
 **Found and deliberately deferred, same pass** (real, lower-urgency-or-larger-scope — not fixed, not forgotten):
 - `materialize_transcript()`/`append_chunk_result()` redo O(n) work (a full copy + full re-walk from index 0) on every single chunk arrival, making total work and total DB bytes written O(n²) across a session — fine at the chunk counts this project's own testing has exercised, a real concern for a full lecture-length session (hundreds to ~1200 chunks/hour).
-- Teacher verification calls SpeechBrain once per Whisper segment with no batching (40-60 sequential CPU forward passes for a typical discussion); RNNoise's round-trip spawns 3 FFmpeg subprocesses per chunk when denoise is on — both are real per-chunk overhead a from a busier deployment would feel, not bugs.
+- Teacher verification calls SpeechBrain once per Whisper segment with no batching (40-60 sequential CPU forward passes for a typical discussion) — real per-chunk overhead a busier deployment would feel, not a bug. (The old RNNoise 3-FFmpeg-subprocess-per-chunk cost is gone — `afftdn` is one subprocess, ~0.1s; see round 8.)
 - `evaluation/wer.py`'s edit distance allocates a full O(n·m) matrix (not a rolling buffer) even for character-level CER on a full session transcript, and `compute_error_rates_by_group()`'s "overall" figure re-runs the whole thing on the concatenated corpus instead of aggregating already-computed per-pair results. `evaluation/teacher_id.py`'s precision/recall/FAR/FRR render as `0.0` (not "undefined") when their denominator is zero. Both are evaluation-script-only (never on any production request path), lower urgency until real evaluation runs are actually happening at a scale where either matters.
-- Minor duplication noted, not refactored: `write_report()` is copy-pasted near-identically across all five `evaluation/*.py` scripts; `backend/utils/errors.py`'s `as_http_exception()` is unused dead code (every route hand-rolls the same mapping instead); `minutes.py`'s `_get_session_or_404` helper isn't reused by `sessions.py`/`teacher.py`'s equivalent inline checks; `audio_service.py` has two near-identical FFmpeg subprocess wrappers (`ingest_audio`'s inline call and `_run_ffmpeg_resample`).
+- Minor duplication noted, not refactored: `write_report()` is copy-pasted near-identically across all five `evaluation/*.py` scripts; `backend/utils/errors.py`'s `as_http_exception()` is unused dead code (every route hand-rolls the same mapping instead); `minutes.py`'s `_get_session_or_404` helper isn't reused by `sessions.py`/`teacher.py`'s equivalent inline checks. (`audio_service.py`'s `_run_ffmpeg_resample` was deleted in round 8 — the denoise round-trip that was its only caller is gone.)
 - **`LICENSE` at the repo root is an empty directory, not a file** — a direct violation of this file's own "must be a root-level file, not a folder" rule. Not fixed: what license to actually apply is Nathan's call, not something to invent.
+
+**Resolved this pass, round 8** (a full-stack stress + integration + front-end/back-end audit against a REAL running API + REAL separate Celery worker + REAL Postgres + REAL Redis — not eager mode — plus the first real per-stage latency/RTF numbers; triggered by "stress test this, make it production-level"):
+- **Noise suppression was completely broken** — `enable_denoise` / the "Accurate" preset. `pyrnnoise` 0.4.3 (last release) raises deep inside `audiolab` on every call (`audiolab` 0.5.2's `rate`→`sample_rate` rename is pervasive; 0.5.1 fails to import on PyAV≥14; no PyAV old enough to satisfy `audiolab` 0.5.1 still installs on py3.11 alongside `faster-whisper`). **Zero test coverage** is why it went unnoticed. On top of that, `clean_audio()`'s `finally` did raw `.unlink()` on files `audiolab` still had open → `PermissionError [WinError 32]` that *replaced* the real exception in the traceback, plus a permanent temp-file leak. **Fixed:** `clean_audio()` now uses **FFmpeg's `afftdn`** filter (PM decision — see "Noise suppression — actual implementation" and `docs/paper-vs-implementation.md` §3.3): in place at 16kHz, one subprocess, ~0.1s/chunk, no Python dependency. `pyrnnoise`/`audiolab` removed from requirements; `_run_ffmpeg_resample` + `RNNOISE_SAMPLE_RATE` deleted. New `tests/test_audio_denoise.py` (4 tests incl. a real noise-floor before/after and a filtergraph-validity check).
+- **Multi-chunk streaming transcript timestamps reset to 0 every chunk** — each streamed chunk is transcribed as its own standalone audio unit, so its whisper/speaker segment times come back chunk-relative (0-based); `materialize_transcript()` just concatenated them, so on a real multi-chunk session every chunk's segments restacked at 0..Ns. The transcript view's timestamps were all wrong and the minutes topic-grouping saw one pile of overlapping segments. **Fixed:** `materialize_transcript()` now shifts each contiguous chunk's segments by the summed audio duration of the preceding ones. `minutes["duration_seconds"]` also switched from "end of last segment" to the authoritative `SessionRecord.duration_seconds`. Verified end-to-end against the real stack: a 3-chunk (3+2+3s) session produced monotonic `[(0,2.04),(2.04,3),(3,5),(5,7.04),(7.04,8)]` and `duration_seconds=8.0`. New tests in `tests/test_tasks.py`.
+- **Redis by `localhost` stalled or timed out every WS connection** — on this dual-stack Windows host `localhost` → `::1` first, which Memurai doesn't listen on; `redis.asyncio` (the WS pub/sub client) ate ~2s per connection waiting for the `::1` refusal, and in the stress test hit an outright `TimeoutError` that dropped the WebSocket with no close frame (client saw a raw `ConnectionClosedError`). **Fixed:** `config.py` default → `redis://127.0.0.1:6379/0`; `pubsub.py` both clients get `socket_connect_timeout=5`; `transcribe_stream` now catches a pub/sub-backend failure and sends one clean `error` frame + closes instead of dropping the socket. CLAUDE.md's documented env values updated.
+- **Flutter "Share minutes" was 100% broken** — `ApiClient.exportMinutes()` routed through `_handle()`, whose 2xx branch runs `jsonDecode()` on the body — but minutes export returns markdown/plain text, so every *successful* export threw a `FormatException` and the share silently did nothing. **Fixed:** split `_handle()` into `_handle()` (JSON) + `_ensureOk()` (status/401 only, no decode); export uses the latter, and its screen handler now catches non-`ApiException` errors too. New `android/test/api_client_test.dart` (4 tests) — `ApiClient` had no test coverage at all before.
+- **Concurrency correctness holds up:** 6 parallel WS sessions × 3 chunks (18 chunk tasks) against the real worker + real Postgres all finalized cleanly, no lost `chunk_results`, no 500s, no hangs — the round-6 row-lock fix and the out-of-order-chunk handling are solid under real contention.
+- **First real latency numbers** (dev machine, 8-core CPU, Whisper `small` int8, `recordings/lecture_preprocessed.wav` 5s clip): cold model load ~7.5s (Whisper 4.2s + SpeechBrain 2.9s + Silero 0.4s); warm per-stage on a 5s clip — preprocess ~0.26s, denoise (`afftdn`) ~0.1s, VAD ~0.3s, transcribe ~7–11s. **Streaming RTF ≈ 2.4–2.9** (a 3s chunk takes ~8.6s to process on one worker) — Whisper `small` int8 on CPU is simply slower than real-time; the async worker-pool split is what keeps this from blocking anything, and `--concurrency=N` / more worker containers is the throughput lever. Silero-load-once (round-5 fix) measured 2.8× on `detect_speech`. `WHISPER_CPU_THREADS` env knob added (set to physical core count → ~17% faster single-stream; leave 0 under a multi-worker pool).
+- **Teacher-ID functional check** (synthetic, NOT manuscript numbers — real numbers need labeled data): enrolled on a voice, same voice scored cosine 0.66–0.88 (>0.35 threshold → is_teacher), a pitch-shifted proxy 0.12, silence 0.06, white noise 0.04 — clean separation, threshold behaves sanely. End-to-end through the real worker: a verified session correctly labelled 3/3 segments.
 
 **Round 3 — production/market-deployment rearchitecture** (explicit scope change past CLAUDE.md's original "no production scaling" boundary, at the user's request after an architecture review): see "Production Architecture" below. This is a real rearchitecture, not additive — `backend/main.py` no longer loads any ML models, `POST /transcribe` is now async (202 + poll), and every route requires auth. The bullets right below this describe the CURRENT shape; treat mentions of "SQLite" or "synchronous" pipeline calls elsewhere in this file as historical unless a bullet here says otherwise.
 
@@ -492,7 +502,7 @@ Each segment in `whisper_segments` contains:
 Everything below lives in `backend/` and `evaluation/`, promoted from the six scripts per CLAUDE.md's rule (scripts themselves untouched).
 
 - **`backend/services/audio_service.py`** — the pipeline orchestrator, unchanged by the Round 3 rearchitecture (only *what calls it* changed — see "Production Architecture"). Adds one thing `process_pipeline.py` never actually did: FFmpeg preprocessing now runs unconditionally on every chunk/file (`ingest_audio()`), closing the gap between the locked "always on" rule and what the script actually executed. Denoise/VAD/diarization/teacher-verification stay independently toggleable. Per-stage latency recorded on every call.
-- **`backend/services/teacher_verification_service.py`** — SpeechBrain ECAPA-TDNN (`spkrec-ecapa-voxceleb`), cosine similarity against enrolled embeddings, lazy-imported the same way `pyrnnoise` already was so a missing install degrades gracefully instead of crashing the worker. Labels each segment `is_teacher`/`teacher_name`/`confidence` — the *identification* half of "teacher voice-prioritized"; `keyword_service.py`/`minutes_service.py` below are the *prioritization* half.
+- **`backend/services/teacher_verification_service.py`** — SpeechBrain ECAPA-TDNN (`spkrec-ecapa-voxceleb`), cosine similarity against enrolled embeddings, lazy-imported so a missing install degrades gracefully (disables `enable_teacher_verification`) instead of crashing the worker. Labels each segment `is_teacher`/`teacher_name`/`confidence` — the *identification* half of "teacher voice-prioritized"; `keyword_service.py`/`minutes_service.py` below are the *prioritization* half.
 - **`backend/services/glossary_service.py`** + **`backend/data/glossary.json`** — case-preserving glossary correction, applied per-chunk right after transcription.
 - **`backend/services/keyword_service.py`** — TextRank on `networkx` (no nltk/sumy), trilingual stopword list. `build_weighted_text()` repeats teacher-labeled segments in the token stream before extraction, so instructional speech dominates the keyword graph instead of getting diluted by side conversation — a no-op when `enable_teacher_verification` was off (no `is_teacher` labels to weight).
 - **`backend/services/minutes_service.py`** — rule-based topics/key-points/definitions/action-items/participants, run once per session at finalize. Teacher-labeled segments are ranked ahead of everyone else's for both key-point selection and topic labeling (again a no-op without teacher-verification data); `teacher_speech_ratio` and `teacher_speakers` (majority-teacher diarized labels) are new top-level fields on the minutes dict. `definitions` is heuristic trilingual pattern matching ("X is a Y", "X ay isang Y", "X amo ang Y", etc.) — same "pattern matching, not NLP" caveat as action items, precision/recall unmeasured until real classroom audio exists to score it against.

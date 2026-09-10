@@ -28,7 +28,7 @@ fixed here (not left as a to-do).
 
 | # | Research Question (Ch. 1) | Specific Objective (Ch. 1) | Built as |
 |---|---|---|---|
-| 1 | Process noisy multilingual classroom audio? | Capture/process audio in noisy real-world environments | `backend/services/audio_service.py` — FFmpeg normalize+loudnorm (always on) → `pyrnnoise` denoise (toggle) → Silero VAD (toggle) |
+| 1 | Process noisy multilingual classroom audio? | Capture/process audio in noisy real-world environments | `backend/services/audio_service.py` — FFmpeg normalize+loudnorm (always on) → FFmpeg `afftdn` denoise (toggle) → Silero VAD (toggle) |
 | 2 | Identify and prioritize teacher speech? | Teacher voice recognition via speaker embeddings | `teacher_verification_service.py` (SpeechBrain ECAPA, cosine similarity) = identification; `keyword_service.build_weighted_text()` + `minutes_service.py`'s teacher-first ranking = prioritization |
 | 3 | Transcribe Hiligaynon/Filipino/English code-switched speech? | Multilingual ASR + Hiligaynon fine-tuning + low-resource eval | Faster-Whisper `small` int8 multilingual; `ai/finetuning/` LoRA/PEFT scaffold (untrained, no corpus yet); `evaluation/wer.py` has a by-group breakdown hook for exactly this |
 | 4 | Generate structured draft classroom minutes? | Key points, topics, definitions, tasks | `minutes_service.py` — all four, `definitions` via trilingual regex patterns |
@@ -189,30 +189,40 @@ Iterative SDLC) explicitly allows for exactly this during
 Implementation, so it doesn't need to be framed as a deviation, just an
 update.
 
-### 3.3 RNNoise: `arnndn` filter (paper) vs. `pyrnnoise` library (code) — paper caught a real gap, now closed differently
+### 3.3 Noise suppression: `arnndn` (paper) → `pyrnnoise` → FFmpeg `afftdn` (code, current)
 
 **Paper (Software Stack, Ch. 3):** "Audio preprocessing relies on
 FFmpeg for format conversion and RNNoise for noise suppression, applied
 through FFmpeg's `arnndn` filter."
 
-**Code:** uses the `pyrnnoise` Python library directly, with a 48kHz
-round-trip (upsample → `RNNoise.denoise_wav()` → downsample back to
-16kHz) — not FFmpeg's `arnndn` filter at all. This was already flagged
-explicitly in CLAUDE.md's "RNNoise — actual implementation" note before
-this pass, so it's a known, deliberate deviation, not something newly
-found.
+**History:** the backend first used the `pyrnnoise` Python library with a
+48kHz round-trip (RNNoise's model runs at 48kHz; the rest of the pipeline
+is 16kHz) — a deliberate deviation from `arnndn`, chosen for portability
+(a plain `pip install`, no external `.rnnn` model file to manage). That
+choice broke: `pyrnnoise` 0.4.3 (the last release) is incompatible with
+every `audiolab`/`PyAV` combination that still installs on Python 3.11
+(the required PyAV downgrade is `ResolutionImpossible` against
+`faster-whisper`). It also had zero test coverage, so the breakage sat
+unnoticed until a full-pipeline stress test with `enable_denoise=True`.
 
-**Recommendation: keep `pyrnnoise`, fix the paper's wording.**
-`arnndn` requires an FFmpeg build compiled with the filter *and* a
-separate `.rnnn` model file present at a known path — neither is
-guaranteed on a given machine's FFmpeg install, which makes it a
-fragile dependency to build a thesis prototype around. `pyrnnoise` is
-a normal `pip install` with no external model-file management, more
-portable across the Windows/Linux environments the manuscript's own
-Environment section says it should run on. Change the Software Stack
-paragraph to name `pyrnnoise` and briefly note the 48kHz round-trip
-requirement (RNNoise's model operates at 48kHz; the rest of this
-pipeline is 16kHz).
+**Current (PM decision):** `backend/services/audio_service.py: clean_audio()`
+now applies **FFmpeg's `afftdn`** (FFT-based broadband denoiser),
+in place at 16kHz — no resample round-trip, no Python dependency, one
+subprocess call, `~0.1s` per chunk vs. the old round-trip's three FFmpeg
+subprocesses. Filter string `afftdn=nr=12:nf=-25:tn=1` (`nf` raised from
+the -50 default because classroom ambient sits above near-silence; `tn=1`
+tracks non-stationary noise) — an unvalidated starting point, same caveat
+as `teacher_verification_threshold`, to tune against real noisy classroom
+recordings once they exist. Covered by `tests/test_audio_denoise.py`.
+
+**Paper wording:** change the Software Stack paragraph to "noise
+suppression via FFmpeg's `afftdn` (FFT denoise) filter" — this is closer
+to the paper's original "applied through FFmpeg" framing than `pyrnnoise`
+ever was, just a different FFmpeg filter than `arnndn`. Note it is not
+RNNoise; if the RNNoise name must be kept, `arnndn` + a committed `.rnnn`
+model file is the fallback (PM chose `afftdn` for zero-setup portability).
+
+### 3.4 Teacher-ID accuracy metric — paper named it, code was missing it (fixed)
 
 ### 3.4 Teacher-ID accuracy metric — paper named it, code was missing it (fixed)
 
@@ -242,7 +252,7 @@ already-built evidence for each characteristic it names:
 | Performance efficiency | Per-stage latency recorded on every pipeline call (`stage_latencies`), `evaluation/latency.py` computes RTF; `evaluation/resources.py` samples CPU/memory via `psutil` |
 | Compatibility / Portability | SQLite-by-default / Postgres-when-configured, Celery eager-mode / real-broker — same code path either way; Windows dev environment + Linux-targeted Docker images |
 | Usability | `evaluation/sus.py` (standard SUS scoring), pending the Flutter app + real respondents |
-| Reliability | Every ML dependency (`pyrnnoise`, pyannote, SpeechBrain) is lazy-imported and degrades gracefully — a missing/failed optional model disables its own toggle rather than crashing the worker (see `backend/worker/celery_app.py: _load_models()`) |
+| Reliability | Every ML dependency (pyannote, SpeechBrain) is lazy-imported and degrades gracefully — a missing/failed optional model disables its own toggle rather than crashing the worker (see `backend/worker/celery_app.py: _load_models()`); denoise is a plain FFmpeg filter with no Python dependency to fail |
 | Security | JWT auth on every route, `bcrypt` password hashing, rate limiting on login/transcribe/enroll, `consent_confirmed` required at session creation, full purge on `DELETE /sessions/{id}`, raw audio never persisted past processing |
 | Maintainability | Service-per-concern under `backend/services/`, each independently unit-tested in `tests/` without needing model weights |
 
@@ -257,7 +267,7 @@ model in mind, not retrofitted to justify it after the fact.
 | Thesis title | Paper is ground truth | README.md's title has now been corrected to match exactly |
 | Context Diagram entities (Teacher/Student/Researcher-Admin vs. generic User) | Keep code (single-role auth); paper's diagram needs no change; add explanatory text | Paper's diagram is conceptual, not a literal auth spec; no functional requirement calls for per-role login |
 | Pipeline order (teacher-ID before vs. after transcription) | Keep code; revise paper's Pseudocode/DFD narrative/Integration Testing text | Code's order avoids a segment-boundary alignment problem the paper's order would require; no efficiency loss since full transcription is needed either way |
-| RNNoise (`arnndn` vs. `pyrnnoise`) | Keep code; revise paper's Software Stack paragraph | `pyrnnoise` is a more portable dependency than a specific FFmpeg build + external model file |
+| Noise suppression (`arnndn` → `pyrnnoise` → `afftdn`) | Code now uses FFmpeg `afftdn`; revise paper's Software Stack paragraph to name it | `pyrnnoise` broke irreparably against current deps; `afftdn` needs no package and no model file, and stays within the paper's "applied through FFmpeg" framing |
 | Teacher-ID accuracy metric | Code was missing it — now added | Paper named it explicitly (Table 1); trivial, safe fix from data already computed |
 
 ## 6. What this doesn't change

@@ -33,9 +33,9 @@ from silero_vad import get_speech_timestamps, load_silero_vad
 from backend.core.config import settings
 from backend.services import diarization_service, teacher_verification_service
 from backend.services.glossary_service import Glossary
+from backend.utils.audio_io import cleanup_temp_files
 
 SAMPLE_RATE = settings.sample_rate
-RNNOISE_SAMPLE_RATE = settings.rnnoise_sample_rate
 # Beyond the original studio-ish formats: .3gp/.3gpp/.amr are what older or
 # basic Android voice-recorder and phone-call-recorder apps actually produce,
 # and .mp4/.mov cover a phone/camera app recording video just to capture
@@ -53,12 +53,19 @@ SUPPORTED_EXTENSIONS = (
 
 
 def load_whisper_model() -> WhisperModel:
-    """Backend-service copy of scripts/transcribe_audio.py's load_model() — loaded once at FastAPI startup."""
+    """Backend-service copy of scripts/transcribe_audio.py's load_model() — loaded once per worker process."""
     try:
         return WhisperModel(
             settings.whisper_model_size,
             device=settings.whisper_device,
             compute_type=settings.whisper_compute_type,
+            # 0 = let CTranslate2 pick (its default). Setting WHISPER_CPU_THREADS
+            # to the host's physical core count measured ~17% faster per
+            # single-stream transcription on the dev machine (8 cores: 8.4s ->
+            # 7.0s for a 5s clip); going past core count regressed. Leave it 0
+            # under a multi-worker pool (--concurrency=N) where the cores are
+            # already divided between processes. See CLAUDE.md perf notes.
+            cpu_threads=settings.whisper_cpu_threads,
         )
     except Exception as error:
         raise RuntimeError(f"Failed to load Whisper model '{settings.whisper_model_size}': {error}")
@@ -129,55 +136,45 @@ def ingest_audio(input_path: Path, output_path: Path) -> Path:
     return output_path
 
 
+# FFmpeg's FFT denoiser. nf (noise floor) raised from its -50 dB default to
+# -25: classroom ambient (HVAC, murmur, chairs) sits well above the near-
+# silence -50 assumes. tn=1 tracks non-stationary noise (a passing bus, the
+# aircon cycling) instead of locking to the first frame's estimate. nr=12 is
+# the default moderate reduction. These are an unvalidated starting point,
+# same caveat as teacher_verification_threshold — tune against real noisy
+# classroom recordings once they exist (RQ1 / evaluation/).
+DENOISE_FILTER = "afftdn=nr=12:nf=-25:tn=1"
+
+
 def clean_audio(input_path: Path, enable_denoise: bool) -> Path:
-    """RNNoise denoising via pyrnnoise's 48kHz round-trip. Skipped entirely (not just its result) when disabled."""
+    """
+    Noise suppression via FFmpeg's afftdn (FFT denoise) filter, in place at
+    16kHz — no resample round-trip. Skipped entirely (not just its result)
+    when disabled. Replaced the pyrnnoise/RNNoise 48kHz round-trip, which
+    became unfixable when pyrnnoise 0.4.3 broke against every installable
+    audiolab/PyAV combination — see docs/paper-vs-implementation.md §3.3.
+    """
     if not enable_denoise:
         return input_path
 
-    try:
-        from pyrnnoise import RNNoise
-    except ImportError:
-        raise RuntimeError(
-            "pyrnnoise is not installed. Install with 'pip install pyrnnoise', "
-            "or call with enable_denoise=False to skip this stage."
-        )
-
-    upsampled_path = input_path.with_name(input_path.stem + "_48k.wav")
-    denoised_48k_path = input_path.with_name(input_path.stem + "_48k_denoised.wav")
     cleaned_path = input_path.with_name(input_path.stem + "_cleaned.wav")
-
-    # In a `finally`, not just after the last step succeeds: if the second
-    # resample (or RNNoise itself) raises, both intermediate 48kHz files
-    # would otherwise leak to disk permanently — the exact privacy property
-    # CLAUDE.md documents ("temp files cleaned up in finally blocks") this
-    # function itself needs to uphold, not just its callers.
-    try:
-        _run_ffmpeg_resample(input_path, upsampled_path, RNNOISE_SAMPLE_RATE)
-
-        denoiser = RNNoise(sample_rate=RNNOISE_SAMPLE_RATE)
-        for _ in denoiser.denoise_wav(str(upsampled_path), str(denoised_48k_path)):
-            pass
-
-        _run_ffmpeg_resample(denoised_48k_path, cleaned_path, SAMPLE_RATE)
-    finally:
-        upsampled_path.unlink(missing_ok=True)
-        denoised_48k_path.unlink(missing_ok=True)
-
-    return cleaned_path
-
-
-def _run_ffmpeg_resample(input_path: Path, output_path: Path, target_sample_rate: int) -> None:
     command = [
         "ffmpeg", "-y",
         "-i", str(input_path),
-        "-ar", str(target_sample_rate),
+        "-af", DENOISE_FILTER,
+        "-ar", str(SAMPLE_RATE),
         "-ac", "1",
         "-c:a", "pcm_s16le",
-        str(output_path),
+        str(cleaned_path),
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg resample to {target_sample_rate}Hz failed: {result.stderr.strip()}")
+        # Cleanup in the failure path too — a partial output file must not leak
+        # (CLAUDE.md's "temp files cleaned up regardless of outcome" property).
+        cleanup_temp_files(cleaned_path)
+        raise RuntimeError(f"ffmpeg denoise (afftdn) failed on '{input_path.name}': {result.stderr.strip()}")
+
+    return cleaned_path
 
 
 def detect_speech(audio_path: Path, enable_vad: bool, silero_vad_model=None) -> tuple[np.ndarray, list[dict]]:
@@ -384,7 +381,9 @@ def run_pipeline(
         # contradicting CLAUDE.md's documented privacy property that temp
         # files are always cleaned up regardless of outcome. `input_path`
         # itself is the caller's temp file, not ours, and isn't touched here.
+        # cleanup_temp_files swallows a locked/missing-file OSError so it
+        # can't replace the real exception when this runs during unwinding.
+        to_clean = [standardized_path]
         if cleaned_path is not None and cleaned_path != standardized_path:
-            cleaned_path.unlink(missing_ok=True)
-        if standardized_path is not None:
-            standardized_path.unlink(missing_ok=True)
+            to_clean.append(cleaned_path)
+        cleanup_temp_files(*(p for p in to_clean if p is not None))

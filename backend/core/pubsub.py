@@ -37,11 +37,18 @@ _USE_REDIS = settings.celery_broker_url is not None
 _in_process_channels: dict[str, list[asyncio.Queue]] = {}
 
 
+# A misconfigured / down Redis should fail a chunk fast and loudly (the
+# task's own except boundary logs it, api/transcribe.py forwards the
+# error frame), never hang the worker or a WS connection for the OS
+# default connect timeout (tens of seconds on Windows).
+_REDIS_CONNECT_KWARGS = {"socket_connect_timeout": 5, "socket_timeout": 5, "socket_keepalive": True}
+
+
 def publish_sync(channel: str, message: dict) -> None:
     if _USE_REDIS:
         import redis
 
-        client = redis.Redis.from_url(settings.redis_url)
+        client = redis.Redis.from_url(settings.redis_url, **_REDIS_CONNECT_KWARGS)
         try:
             client.publish(channel, json.dumps(message))
         finally:
@@ -79,7 +86,7 @@ async def subscribe(channel: str):
     if _USE_REDIS:
         import redis.asyncio as aioredis
 
-        client = aioredis.Redis.from_url(settings.redis_url)
+        client = aioredis.Redis.from_url(settings.redis_url, **_REDIS_CONNECT_KWARGS)
         pubsub = client.pubsub()
         await pubsub.subscribe(channel)
         try:

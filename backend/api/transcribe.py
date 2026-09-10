@@ -209,6 +209,18 @@ async def transcribe_stream(websocket: WebSocket, db: DbSession = Depends(get_db
         await asyncio.gather(receive_chunks(), listen_results())
     except WebSocketDisconnect:
         state["disconnected"] = True
+    except Exception as error:
+        # e.g. the pub/sub backend (Redis) is unreachable — listen_results()
+        # can't even subscribe. Without this the connection just drops with no
+        # close frame and the client sees a raw ConnectionClosedError; send one
+        # clean error frame and mark the session interrupted like any other
+        # mid-session failure.
+        state["disconnected"] = True
+        try:
+            await websocket.send_json({"type": "error", "detail": f"Streaming backend error: {error}"})
+            await websocket.close()
+        except Exception:
+            pass
     finally:
         if state["disconnected"] and session.status == "in_progress":
             session.status = "interrupted"
