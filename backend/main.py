@@ -62,7 +62,12 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins,
-    allow_credentials=True,
+    # False, not True: auth is a Bearer token in the Authorization header, never
+    # a cookie, so credentialed CORS mode buys nothing — and `allow_origins=["*"]`
+    # together with `allow_credentials=True` is a combination browsers reject for
+    # any credentialed request anyway. (CORS is moot for the Flutter client, which
+    # isn't a browser; this only matters for a browser-based caller.)
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
