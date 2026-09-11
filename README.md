@@ -94,7 +94,7 @@ academic-discussion-assistant/
 ├── ai/finetuning/                 LoRA/PEFT fine-tune + CTranslate2 convert scripts, not yet run (section 12)
 ├── datasets/                      raw/ · clean/ · processed/ · metadata/ — scaffolded, empty pending the team's corpus
 ├── tests/                         pytest coverage — pure-logic services + real end-to-end Celery task tests (eager mode)
-├── android/                       Flutter client — all 6 screens built, tested (57 Dart unit tests), and verified
+├── android/                       Flutter client — all 6 screens built, tested (69 Dart unit tests), and verified
 │                                  end-to-end on an Android emulator against the real backend (section 10)
 ├── models/                        downloaded/trained weights land here, gitignored — not backend/models/ (that's source code)
 ├── transcripts/                   scaffolded, empty — transcripts now persist to the DB, not this folder
@@ -228,10 +228,10 @@ On first launch, go to **Settings** and check the server address: it defaults to
 
 ```bash
 flutter analyze     # must be clean
-flutter test        # 57 pure-Dart unit tests, no device needed
+flutter test        # 69 pure-Dart unit/widget tests, no device needed
 ```
 
-Covers: pipeline preset resolution and exact JSON key names against the backend schema (the single highest-risk typo surface in the app), WAV header encoding, PCM chunking + the on-device VAD gating/hangover sequence, the on-device VAD's RMS math itself, model `fromJson` parsing, WebSocket message parsing, and the polling backoff helper. Things that genuinely need a device (real mic capture, the real WebSocket round-trip) are exercised manually against the real backend, not automated — see `CLAUDE.md`'s "Flutter Client (Built)" section for exactly what's been verified this way and what hasn't (a physical device, real classroom audio, and a couple of secondary screens with real non-empty data are still open).
+Covers: pipeline preset resolution and exact JSON key names against the backend schema (the single highest-risk typo surface in the app), WAV header encoding, PCM chunking + the on-device VAD gating/hangover sequence, the on-device VAD's RMS math itself, model `fromJson` parsing, WebSocket message parsing, the polling backoff helper, `ApiClient`'s response handling, and two widget tests for the app-wide auth gate and the session list's swipe-to-delete. Things that genuinely need a device (real mic capture, the real WebSocket round-trip) are exercised manually against the real backend, not automated — see `CLAUDE.md`'s "Flutter Client (Built)" section for exactly what's been verified this way and what hasn't (a physical device, real classroom audio, and a couple of secondary screens with real non-empty data are still open).
 
 ### What it does on-device before anything reaches the network
 
