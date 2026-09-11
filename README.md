@@ -49,16 +49,15 @@ pip install faster-whisper
 pip install torch torchaudio
 pip install silero-vad
 pip install pyannote.audio
-pip install pyrnnoise   # optional — see note below
 ```
 
-Or, once `requirements.txt` is in place at the repo root:
+Or, from the repo root:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-**`pyrnnoise` is optional and may not install cleanly on Windows.** It wraps a C library and can require CMake / a C++ build toolchain if no prebuilt wheel matches your Python version. That's expected, not a broken setup — RNNoise is designed to be skippable in this architecture (`enable_denoise=False`). Try it; if it fails, move on and revisit later.
+**Noise suppression** (`--denoise` / `enable_denoise`) is FFmpeg's `afftdn` filter now — no Python package to install, just FFmpeg (§2). The old `pyrnnoise`/RNNoise dependency was dropped after it stopped building against current `audiolab`/PyAV; see `docs/paper-vs-implementation.md` §3.3.
 
 ---
 
@@ -129,7 +128,7 @@ python transcribe_audio.py ../recordings/lecture_preprocessed.wav
 ```
 
 ### `process_pipeline.py`
-The configurable core: optional RNNoise → optional Silero VAD → Whisper → optional pyannote diarization, with speaker labels merged into the transcript by timestamp overlap.
+The configurable core: FFmpeg standardize (always on) → optional `afftdn` denoise → optional Silero VAD → Whisper → optional pyannote diarization, with speaker labels merged into the transcript by timestamp overlap.
 ```bash
 python process_pipeline.py ../recordings/lecture_preprocessed.wav [--denoise] [--no-vad] [--diarize] [--hf-token TOKEN] [--num-speakers N]
 ```

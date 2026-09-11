@@ -154,16 +154,16 @@ academic-discussion-assistant/
 
 ## Six Built Scripts in `scripts/`
 
-These are dev utilities. Their logic gets promoted into `backend/services/` — not the scripts themselves.
+These are dev utilities. Their logic was promoted into `backend/services/`; the scripts were originally frozen after that, but that rule was **lifted in round 10** — they're maintained again (bug fixes, kept in step with `backend/services/` where it matters). `backend/` remains the real thing; the scripts are for local one-off runs.
 
 1. `record_test_audio.py` — mic capture → `recordings/classroom.wav` (16000 Hz mono int16)
 2. `preprocess_audio.py` — FFmpeg standardization (16kHz mono PCM WAV, loudnorm)
 3. `transcribe_audio.py` — Faster-Whisper `small`, int8 CPU, shared `load_model()`
-4. `process_pipeline.py` — full pipeline orchestrator with toggle flags; `merge_transcript_with_speakers()` built
-5. `simulate_streaming.py` — chunks file into 1–10s pieces (default 3s); full pipeline per chunk
+4. `process_pipeline.py` — full pipeline orchestrator with toggle flags. `standardize_audio()` (FFmpeg, always-on) → `clean_audio()` (afftdn, optional) → VAD → Whisper → diarize + merge. Kept in step with `audio_service.py` (round 10).
+5. `simulate_streaming.py` — chunks file into 1–10s pieces (default 3s); full pipeline per chunk. A trailing chunk ≤1s is folded into the previous one (round 10 — a sub-second chunk reliably triggers a Whisper repetition-loop).
 6. `diarize_audio.py` — standalone pyannote pipeline; maps raw labels to Speaker A/B/C by first-appearance
 
-**`process_pipeline.py` logic → `backend/services/audio_service.py`** is the first major backend build task.
+**`process_pipeline.py` logic → `backend/services/audio_service.py`** was the first major backend build task (done).
 
 ---
 
@@ -365,7 +365,7 @@ From `process_pipeline.py` CLI flags (for reference):
 - `nf=-25` (noise floor, raised from the -50 default — classroom ambient sits above near-silence) and `tn=1` (track non-stationary noise) are an **unvalidated heuristic default**, same caveat as `teacher_verification_threshold`. Tune against real noisy classroom audio once it exists.
 - One temp file (`_cleaned.wav`), cleaned up in `run_pipeline()`'s `finally` (and in `clean_audio`'s own failure path).
 - `enable_denoise=False` (default) — opt-in, not opt-out. Covered by `tests/test_audio_denoise.py`.
-- `scripts/process_pipeline.py` (frozen pre-backend dev utility) still has the old `pyrnnoise` `clean_audio` — also broken, not fixed (scripts are frozen per this file's rule); `pip install pyrnnoise` by hand if you need that script's `--denoise`.
+- `scripts/process_pipeline.py` + `simulate_streaming.py` `--denoise` also use `afftdn` now (round 10) — the scripts-are-frozen rule was lifted so they could actually be fixed. `pyrnnoise` is no longer imported anywhere.
 
 ### Waveform loading — soundfile not torchaudio
 - `_load_waveform()` uses `soundfile` (`sf.read()`) instead of `silero_vad`'s `read_audio()`
@@ -388,7 +388,7 @@ Each segment in `whisper_segments` contains:
 
 ### process_pipeline.py CLI flags (complete)
 - `audio_file` — positional, path to preprocessed 16kHz mono WAV
-- `--denoise` — enable denoising (off by default; backend uses `afftdn`, the frozen script still references `pyrnnoise`)
+- `--denoise` — enable FFmpeg `afftdn` denoising (off by default; same filter as `audio_service.py`)
 - `--no-vad` — skip Silero VAD
 - `--diarize` — enable pyannote diarization
 - `--hf-token` — Hugging Face token (or set `HF_TOKEN` env var)
@@ -504,15 +504,23 @@ Each segment in `whisper_segments` contains:
 - **CORS `allow_credentials`** flipped `True`→`False` in `main.py` — auth is a Bearer token, never a cookie, so credentialed CORS mode does nothing, and `allow_origins=["*"]` + `allow_credentials=True` is a combination browsers reject anyway. (Moot for the Flutter client — not a browser — but a latent misconfiguration for any browser caller.)
 - **Dead code deleted**: `backend/utils/errors.py` (`as_http_exception`, imported nowhere).
 
+**Resolved this pass, round 10** (the "scripts are frozen" rule was **lifted by the PM** — `scripts/` is maintained again; these were the broken bits, all now runnable end to end against `recordings/lecture_preprocessed.wav`):
+- **`process_pipeline.py --denoise` was broken** the same way the backend's was — `pyrnnoise` 0.4.3 raises in `audiolab`. Switched to FFmpeg `afftdn` (same `DENOISE_FILTER` string as `audio_service.py`); deleted `_run_ffmpeg_resample` + `RNNOISE_SAMPLE_RATE`.
+- **`process_pipeline.py` had no standardization step at all** — it went straight to transcription, so on `recordings/lecture_preprocessed.wav` (a short clip ending mid-word) Faster-Whisper hit a repetition-loop hallucination: 25 segments, `"...give a test of a test of a test..."`, timestamps running to 28s for a 5s file. Added an always-on `standardize_audio()` (FFmpeg 16kHz mono + loudnorm, mirrors `ingest_audio()`) — CLAUDE.md rule 1, which the script never actually followed. With it: 2 clean segments, correct text. `process_pipeline()` also now cleans its FFmpeg intermediates in a `finally`.
+- **`diarize_audio.py` had the same `output.speaker_diarization` unpacking bug** as `diarization_service.py` (round 9) — `for turn, speaker in ...` on a pyannote `Annotation` unpacks `Segment` float-tuples, then `turn.start` → `AttributeError` on every run. Fixed to `.itertracks(yield_label=True)`, robust to a bare `Annotation`.
+- **`simulate_streaming.py`** inherited both fixes via `process_pipeline`; its `--denoise` help text updated. `split_into_chunks()` now folds a trailing chunk of ≤`MIN_CHUNK_DURATION_SECONDS` into the previous one instead of writing it out — a ~1s tail chunk reliably triggered the Whisper repetition loop (observed: one spinning 77s and returning `""`). Verified: a 5s file at `--chunk-seconds 2` now yields 2 chunks (2s + 3s) with a coherent combined transcript, no stall.
+- `transcribe_audio.py` and `record_test_audio.py` were checked and work as-is (path-based Whisper decode via `av` 18 is fine; `sd.rec` mic capture unchanged).
+- `evaluation/latency.py` + `resources.py` `--denoise` help strings updated to "afftdn".
+
 **Round 3 — production/market-deployment rearchitecture** (explicit scope change past CLAUDE.md's original "no production scaling" boundary, at the user's request after an architecture review): see "Production Architecture" below. This is a real rearchitecture, not additive — `backend/main.py` no longer loads any ML models, `POST /transcribe` is now async (202 + poll), and every route requires auth. The bullets right below this describe the CURRENT shape; treat mentions of "SQLite" or "synchronous" pipeline calls elsewhere in this file as historical unless a bullet here says otherwise.
 
 ---
 
 ## Backend (Built)
 
-Everything below lives in `backend/` and `evaluation/`, promoted from the six scripts per CLAUDE.md's rule (scripts themselves untouched).
+Everything below lives in `backend/` and `evaluation/`, promoted from the six scripts. (The scripts were frozen after promotion; that rule was lifted in round 10 — see "Six Built Scripts" above.)
 
-- **`backend/services/audio_service.py`** — the pipeline orchestrator, unchanged by the Round 3 rearchitecture (only *what calls it* changed — see "Production Architecture"). Adds one thing `process_pipeline.py` never actually did: FFmpeg preprocessing now runs unconditionally on every chunk/file (`ingest_audio()`), closing the gap between the locked "always on" rule and what the script actually executed. Denoise/VAD/diarization/teacher-verification stay independently toggleable. Per-stage latency recorded on every call.
+- **`backend/services/audio_service.py`** — the pipeline orchestrator, unchanged by the Round 3 rearchitecture (only *what calls it* changed — see "Production Architecture"). FFmpeg preprocessing runs unconditionally on every chunk/file (`ingest_audio()`), per the locked "always on" rule. Denoise (`afftdn`)/VAD/diarization/teacher-verification stay independently toggleable. Per-stage latency recorded on every call.
 - **`backend/services/teacher_verification_service.py`** — SpeechBrain ECAPA-TDNN (`spkrec-ecapa-voxceleb`), cosine similarity against enrolled embeddings, lazy-imported so a missing install degrades gracefully (disables `enable_teacher_verification`) instead of crashing the worker. Labels each segment `is_teacher`/`teacher_name`/`confidence` — the *identification* half of "teacher voice-prioritized"; `keyword_service.py`/`minutes_service.py` below are the *prioritization* half.
 - **`backend/services/glossary_service.py`** + **`backend/data/glossary.json`** — case-preserving glossary correction, applied per-chunk right after transcription.
 - **`backend/services/keyword_service.py`** — TextRank on `networkx` (no nltk/sumy), trilingual stopword list. `build_weighted_text()` repeats teacher-labeled segments in the token stream before extraction, so instructional speech dominates the keyword graph instead of getting diluted by side conversation — a no-op when `enable_teacher_verification` was off (no `is_teacher` labels to weight).
