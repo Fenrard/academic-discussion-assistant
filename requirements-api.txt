@@ -5,7 +5,7 @@
 # .delay(), but each task's heavy imports are lazy, inside its function body, so
 # importing backend.worker.tasks here to get those objects stays cheap). Verified via
 # `import backend.api.transcribe; import backend.api.teacher` loading none of
-# torch/faster_whisper/pyannote/silero_vad/speechbrain/pyrnnoise.
+# torch/faster_whisper/pyannote/silero_vad/speechbrain.
 
 fastapi
 uvicorn[standard]

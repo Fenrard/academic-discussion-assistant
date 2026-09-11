@@ -34,9 +34,15 @@ jobs:
 
     env:
       DATABASE_URL: postgresql+psycopg://scaitale:scaitale_ci_password@localhost:5432/scaitale_ci
-      REDIS_URL: redis://localhost:6379/0
-      CELERY_BROKER_URL: redis://localhost:6379/0
-      CELERY_RESULT_BACKEND: redis://localhost:6379/0
+      # 127.0.0.1, not "localhost", for the Redis URLs specifically: matches
+      # backend/core/config.py's default (round 8) — on a dual-stack host,
+      # "localhost" tries ::1 first, and redis.asyncio pays for that attempt
+      # (a real multi-second stall was measured on Windows dev; harmless here
+      # since this runner's service container likely isn't listening on ::1
+      # at all, but there's no reason to pay for the extra hop either).
+      REDIS_URL: redis://127.0.0.1:6379/0
+      CELERY_BROKER_URL: redis://127.0.0.1:6379/0
+      CELERY_RESULT_BACKEND: redis://127.0.0.1:6379/0
       JWT_SECRET_KEY: ci-only-secret-not-for-production
       ENVIRONMENT: development
 
