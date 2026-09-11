@@ -25,6 +25,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = true;
   String? _error;
   List<SessionSummary> _sessions = const [];
+  bool _isOpeningRecorder = false;
 
   @override
   void initState() {
@@ -111,10 +112,20 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: _buildBody(),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () async {
-          await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const LiveRecordingScreen()));
-          if (mounted) _load();  // a 401 during recording can force-logout and dispose this screen mid-await
-        },
+        // Guarded against a double-tap pushing two LiveRecordingScreens at
+        // once (the push transition doesn't itself prevent a second tap
+        // landing before it covers the FAB) -- two screens both grabbing the
+        // microphone would be a confusing way to lose a recording, not just
+        // a cosmetic double-navigation.
+        onPressed: _isOpeningRecorder
+            ? null
+            : () async {
+                setState(() => _isOpeningRecorder = true);
+                await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const LiveRecordingScreen()));
+                if (!mounted) return; // a 401 during recording can force-logout and dispose this screen mid-await
+                setState(() => _isOpeningRecorder = false);
+                _load();
+              },
         icon: const Icon(Icons.mic),
         label: const Text('New session'),
       ),
