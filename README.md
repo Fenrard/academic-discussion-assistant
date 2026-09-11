@@ -1,12 +1,12 @@
-# Talakayan (Scaitale)
+# Scaitale
 
 > **Development and Evaluation of a Noise-Aware Code-Switching Multilingual Speech Recognition and Automated Summarization System for Hiligaynon Classroom Discourse**
 >
-> Confirmed against the actual manuscript title page (`THESIS_ Development and Evaluation of a Noise-Aware Code-Switching Multilingual Speech Recognition and Automated Summarization System for Hiligaynon Classroom Discourse (4).docx`) — this is the real title, matching CLAUDE.md's "Full thesis title" line exactly. The previous version of this line here said "Tagalog" instead of "Filipino" and used older, superseded wording; both are now fixed. See `docs/paper-vs-implementation.md` for the full comparison against the manuscript's Chapter 1 and Chapter 3.
+> Confirmed against the actual manuscript title page (`THESIS_ Development and Evaluation of a Noise-Aware Code-Switching Multilingual Speech Recognition and Automated Summarization System for Hiligaynon Classroom Discourse (4).docx`) — this is the real title, matching CLAUDE.md's "Full thesis title" line exactly. This file's own heading used to read "Talakayan (Scaitale)" — "Talakayan" was an earlier working name, now dropped in favor of the one actually used everywhere else (CLAUDE.md, the repo's own conversation history, this file's remaining eleven sections). See `docs/paper-vs-implementation.md` for the full comparison against the manuscript's Chapter 1 and Chapter 3.
 
 An Android-first (Flutter) hybrid AI system for near real-time, multilingual classroom transcription, built as an undergraduate Computer Science thesis. A FastAPI backend performs the heavy AI inference — noise suppression, server-side voice activity detection, teacher verification, speaker diarization, and transcription — while the mobile client stays lightweight: a real energy-based voice activity gate now runs on-device too, deciding whether a chunk is even worth sending before it ever reaches the network.
 
-**Status: backend and Flutter client both built, production-hardened, and verified end-to-end.** `scripts/` still holds the six standalone prototype modules documented below (untouched, still independently runnable). Their logic has been promoted into a real backend split across two tiers — `backend/main.py` (FastAPI, no ML models, auth-gated) and `backend/worker/` (Celery, the actual pipeline) — with Postgres persistence, async `POST /transcribe` + `WS /ws/transcribe`, teacher enrollment/verification, glossary post-processing, TextRank keywords, rule-based minutes, `evaluation/`'s metric scripts, and `deployment/`'s Docker + CI setup. The Flutter client (`android/`) implements all six required screens against that real backend contract and has been run end-to-end on an Android emulator against the actual running stack — see section 10. What's left is Nathan's own work or blocked on real-world data/people (ethics clearance, real classroom recordings, the fine-tuning run, a physical-device test), not more code. This README covers what's needed to get the prototype scripts, the backend, the Flutter client, and (once you have Docker) the full deployment running.
+**Status: backend and Flutter client both built, production-hardened, and verified end-to-end** — including a real stress-test pass against a genuinely separate Celery worker, real Postgres, and real Redis (not just eager mode), which caught and fixed real bugs a unit-test-only pass wouldn't have (see `CLAUDE.md`'s rounds 8–11). `scripts/` still holds the six standalone prototype modules documented below, independently runnable — they were frozen once their logic was promoted into the backend, but that rule was **lifted** once real classroom audio became imminent, and they've since had real fixes of their own (a Faster-Whisper repetition-loop hallucination, a broken denoiser, a diarization output-parsing bug — see section 8). Their logic has been promoted into a real backend split across two tiers — `backend/main.py` (FastAPI, no ML models, auth-gated) and `backend/worker/` (Celery, the actual pipeline) — with Postgres persistence, async `POST /transcribe` + `WS /ws/transcribe`, teacher enrollment/verification, glossary post-processing, TextRank keywords, rule-based minutes, `evaluation/`'s metric scripts, and `deployment/`'s Docker + CI setup. The Flutter client (`android/`) implements all six required screens against that real backend contract and has been run end-to-end on an Android emulator against the actual running stack — see section 10. What's left is Nathan's own work or blocked on real-world data/people (ethics clearance, real classroom recordings, the fine-tuning run, a physical-device test), not more code. This README covers what's needed to get the prototype scripts, the backend, the Flutter client, and (once you have Docker) the full deployment running.
 
 ---
 
@@ -115,7 +115,7 @@ python record_test_audio.py
 ```
 
 ### `preprocess_audio.py`
-Standardizes any input audio (`.mp3 .wav .m4a .ogg .webm .flac .aac`) into 16kHz mono PCM WAV via FFmpeg.
+Standardizes any input audio (`.wav .mp3 .m4a .ogg .webm .flac .aac .3gp .3gpp .amr .mp4 .mov .opus .wma` — widened to cover real phone-recorder/video-container formats, not just studio ones) into 16kHz mono PCM WAV via FFmpeg.
 ```bash
 python preprocess_audio.py ../recordings/classroom.wav
 ```
@@ -134,7 +134,7 @@ python process_pipeline.py ../recordings/lecture_preprocessed.wav [--denoise] [-
 ```
 
 ### `simulate_streaming.py`
-Splits a file into fixed-duration chunks (1–10s, default 3s) and runs each independently through `process_pipeline()`, simulating how a real backend will receive live audio.
+Splits a file into fixed-duration chunks (1–10s, default 3s) and runs each independently through `process_pipeline()`, simulating how a real backend will receive live audio. A trailing chunk at or under `MIN_CHUNK_DURATION_SECONDS` gets folded into the previous one rather than run on its own — a lone ~1s tail reliably triggers a Faster-Whisper repetition-loop hallucination.
 ```bash
 python simulate_streaming.py ../recordings/lecture_preprocessed.wav --chunk-seconds 3 [--denoise] [--no-vad] [--diarize] [--hf-token TOKEN]
 ```
@@ -152,6 +152,7 @@ python diarize_audio.py ../recordings/lecture_preprocessed.wav [--hf-token TOKEN
 - **Unresolved, but not a code bug:** `record_test_audio.py` printed `Sample rate: 1600 Hz` in one test run instead of `16000 Hz`. A code review found no discoverable defect — `record_audio()`, `save_recording()`, and `inspect_wav_file()` all thread the same `sample_rate=16000` variable through consistently, so this reads as a one-off hardware/driver quirk (or a misreported terminal capture) rather than a reproducible bug. Worth a manual re-check with a real mic if it recurs.
 - **`requirements.txt` is intentionally unpinned** (package names only, no version numbers) while the environment is still in flux — worth pinning once it stabilizes.
 - These six scripts stay CLI-only/file-path-based by design — see `backend/` (section 9) for the wired-up equivalent.
+- **These scripts were fixed, not just left alone, once real classroom audio made them worth trusting again.** They'd been frozen after `backend/services/`'s equivalents were promoted from them; that rule was later lifted, and a real audit turned up three genuine bugs that had been sitting there the whole time: `process_pipeline.py --denoise` used the same now-broken `pyrnnoise`/RNNoise dependency the backend originally had (fixed to FFmpeg's `afftdn`, matching `audio_service.py`); `process_pipeline.py` never actually standardized its input before transcribing, which on a short test clip made Faster-Whisper spin into a repetition-loop hallucination (fixed by adding the same always-on FFmpeg normalize step `audio_service.py` has); and `diarize_audio.py` unpacked pyannote's diarization output incorrectly, raising `AttributeError` on every real run (fixed). See `CLAUDE.md`'s "Resolved this pass, round 10" for the full account.
 
 ---
 

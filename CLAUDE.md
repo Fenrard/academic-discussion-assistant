@@ -127,9 +127,10 @@ academic-discussion-assistant/
 │   ├── models/
 │   ├── utils/
 │   └── main.py
-├── ai/                       # finetuning/ only has real content (LoRA train + convert scripts) — whisper/,
-│                             # rnnoise/, silero/, pyannote/, speechbrain/ are empty, untracked leftovers from
-│                             # early planning; that wrapping logic actually lives in backend/services/ instead
+├── ai/                       # finetuning/ (LoRA train + convert scripts) is the only thing in here now — whisper/,
+│                             # rnnoise/, silero/, pyannote/, speechbrain/ were empty, untracked leftovers from
+│                             # early planning (that wrapping logic actually lives in backend/services/ instead)
+│                             # and have since been deleted from disk, not just left empty
 ├── models/                   # Trained weights/embeddings only (NO source code)
 ├── datasets/
 │   ├── raw/
@@ -139,8 +140,9 @@ academic-discussion-assistant/
 ├── recordings/
 ├── transcripts/
 ├── experiments/              # Per-experiment folders for thesis results
-├── evaluation/                # wer.py, latency.py, teacher_id.py, sus.py, resources.py — flat scripts, not the
-│                               # wer/cer/latency/ subdirectories once planned; reports/ and plots/ are real output dirs
+├── evaluation/                # wer.py, latency.py, teacher_id.py, sus.py, resources.py — flat scripts; the
+│                               # wer/cer/latency/ subdirectories once planned were empty leftovers, since deleted
+│                               # (same as ai/, above); reports/ and plots/ are the real output dirs
 ├── docs/                     # DFD.md (Level 0 + Level 1 data flow diagrams), DevelopmentLog.md, future_ideas.md, paper-vs-implementation.md
 ├── scripts/                  # Dev utilities only, NOT app code
 ├── tests/
@@ -592,13 +594,13 @@ Lives at `android/` (repo root — see "Repo Structure" above; Flutter's own gen
 - Tested on the Android **emulator**, not a physical device — real classroom deployment needs a phone on the same Wi-Fi as the backend, which the Settings screen's editable server-address field supports (`10.0.2.2` is emulator-only; a physical device needs the host's real LAN IP) but which hasn't itself been exercised.
 - The emulator's virtual microphone is silent, so no real classroom audio has been transcribed through the client yet. Both the server pipeline's VAD and the client's own `LocalVad` (added round 5, below) correctly treat this as "no speech" rather than hallucinating — but this also means an emulator run now sends far fewer chunks to the server than the pre-VAD build did (typically just the hangover-guaranteed first chunk of a session), a real wire-behavior change, not just an internal one. Transcription accuracy on real speech through the *client* (as opposed to through `scripts/`, already covered by backend tests) remains unverified.
 - "Import audio file" (`POST /transcribe`'s whole-file path) has no UI — deliberately descoped, not one of the six required screens; noted in `docs/future_ideas.md`.
-- Session list swipe-to-delete, the Minutes screen with real (non-empty) content, and transcript search/highlight against real multi-segment text were code-reviewed but not exercised on-device this session (no session with actual detected speech existed yet to view).
+- The Minutes screen with real (non-empty) content, and transcript search/highlight against real multi-segment text, were code-reviewed but not exercised on-device this session (no session with actual detected speech existed yet to view). Session list swipe-to-delete is the one exception: it was never exercised on-device either, but the bug-hunting pass gave it real automated coverage instead — `android/test/home_screen_test.dart` (round 11) drives the actual swipe/confirm/delete gesture in a widget test and caught a genuine crash (a failed delete poisoning the list on the next reload) no amount of on-device poking without deliberately failing the network call would have surfaced.
 
 ---
 
 ## Current Build Priority — superseded, see below
 
-The original 14-day sprint list (items 1–4, 8, 9, 11) is done — see "Backend (Built)" and the four "Resolved this pass" rounds above. **All backend/code work is done as of round 4. The Flutter client is now built too — see "Flutter Client (Built)" below.** Everything genuinely still open from here is either Nathan's own work or blocked on real-world data/people, not more code:
+The original 14-day sprint list (items 1–4, 8, 9, 11) is done — see "Backend (Built)" and the "Resolved this pass" rounds above (now eleven of them: round 4 closed the last real feature gaps against the thesis's specific objectives; rounds 5–11 are review/bug-hunt/hardening passes — real bugs found and fixed against a genuinely running stack, not new scope). The Flutter client is built too — see "Flutter Client (Built)" below. An operator's runbook (build/run/test/fine-tune/package/hybrid-deploy, all in one place) also exists as a published Claude artifact from this same line of work — regenerate or update it via the `artifact-design`/`artifact-diagramming` skills if asked for one and it isn't already linked in the conversation. Everything genuinely still open from here is either Nathan's own work or blocked on real-world data/people, not more code:
 
 - **Ethics/consent clearance** — Nathan's, blocks all real classroom recording.
 - **Real classroom data collection** (Nathan + Andrei + Dan Joseph) — blocks everything below.
