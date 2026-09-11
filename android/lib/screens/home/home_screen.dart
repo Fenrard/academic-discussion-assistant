@@ -60,10 +60,21 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _delete(SessionSummary session) async {
+    // Optimistic, unconditional removal — SessionListTile's Dismissible has
+    // already animated itself away and calls this exactly once. If the item
+    // were left in `_sessions` after a failed delete, the *next* rebuild of
+    // this list (pull-to-refresh, or returning from a new recording, both of
+    // which call _load()) would recreate a Dismissible with the same key on
+    // an already-"dismissed" State, and Flutter throws ("A dismissed
+    // Dismissible widget is still part of the tree.") — reproduced directly
+    // via a widget test that swiped, failed the delete, then reloaded.
+    // Removing it here regardless of outcome avoids that; a failed delete is
+    // surfaced via the snackbar below and self-heals on the next _load() (the
+    // session reappears from the server as a fresh widget/key, not a reused
+    // poisoned one).
+    setState(() => _sessions = _sessions.where((s) => s.id != session.id).toList());
     try {
       await context.read<ApiClient>().deleteSession(session.id);
-      if (!mounted) return;
-      setState(() => _sessions = _sessions.where((s) => s.id != session.id).toList());
     } on ApiException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not delete session: ${e.message}')));
