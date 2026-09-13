@@ -437,7 +437,7 @@ Each segment in `whisper_segments` contains:
 
 ## Known Open Issues
 
-- Flutter WebSocket integration: **built and verified end-to-end on an Android emulator** — see "Flutter Client (Built)" below. Real physical-device testing (as opposed to emulator) is still open.
+- Flutter WebSocket integration: **built and verified end-to-end on an Android emulator** — see "Flutter Client (Built)" below. Real physical-device testing (as opposed to emulator) is still open. **One prerequisite for that test found only while writing it up, not yet exercised**: every `uvicorn backend.main:app` invocation anywhere in this file/README defaults to binding `127.0.0.1` (loopback-only). That's invisible on the emulator, since `10.0.2.2` is QEMU's own alias straight back to the host's loopback — but a physical device on the real Wi-Fi NIC would be refused outright by a loopback-only listener, silently (a hang, not an error the app can show). A physical-device run needs `uvicorn backend.main:app --host 0.0.0.0 --port 8000` specifically, plus a Windows Firewall inbound-allow rule for that port.
 - Per-chunk diarization has no cross-chunk speaker continuity (restarts each chunk) — unchanged, still true for streamed WS chunks
 - Ethics/consent clearance for classroom recordings — must resolve before September recordings
 - Whisper first-segment language lock on code-switched speech — known artifact, accepted

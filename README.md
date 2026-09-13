@@ -223,7 +223,7 @@ flutter pub get
 flutter run                    # picks the first available device/emulator, or add -d <device-id>
 ```
 
-On first launch, go to **Settings** and check the server address: it defaults to `http://10.0.2.2:8000` on Android (the standard host-loopback alias for an emulator reaching the same machine's backend) or `http://127.0.0.1:8000` on the Windows-desktop target. A **physical device** needs the host machine's real LAN IP instead — both the phone and the backend must be on the same Wi-Fi, per this project's local-first design (no cloud, see the Hybrid Edge/Server Design note in `CLAUDE.md`).
+On first launch, go to **Settings** and check the server address: it defaults to `http://10.0.2.2:8000` on Android (the standard host-loopback alias for an emulator reaching the same machine's backend) or `http://127.0.0.1:8000` on the Windows-desktop target. A **physical device** needs the host machine's real LAN IP instead — both the phone and the backend must be on the same Wi-Fi, per this project's local-first design (no cloud, see the Hybrid Edge/Server Design note in `CLAUDE.md`). That also means starting the backend with `uvicorn backend.main:app --host 0.0.0.0 --port 8000`, not the bare `--reload` form used above — the default binds to `127.0.0.1` (loopback only), which a real phone on the Wi-Fi NIC can't reach at all even with the right IP typed in (this is invisible on the emulator, since `10.0.2.2` is a special QEMU alias straight back to the host's own loopback). You'll likely also need a one-time Windows Firewall inbound-allow rule for port 8000.
 
 ### Tests
 
