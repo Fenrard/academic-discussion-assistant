@@ -1,11 +1,17 @@
 """
-Speech-processing pipeline prototype: (optional) RNNoise denoising ->
-(optional) Silero VAD -> Faster-Whisper transcription -> (optional)
-pyannote diarization + speaker-label merge. Every stage after
-preprocessing can be switched off independently, so a classroom
-situation can trade transcript completeness for latency rather than
-always paying for the full stack. Written to be imported into
-backend/services/ later, so nothing here is CLI-coupled beyond main().
+Speech-processing pipeline prototype: FFmpeg standardization (always on)
+-> (optional) FFmpeg afftdn denoising -> (optional) Silero VAD ->
+Faster-Whisper transcription -> (optional) pyannote diarization +
+speaker-label merge. Every stage after standardization can be switched
+off independently, so a classroom situation can trade transcript
+completeness for latency rather than always paying for the full stack.
+
+Kept in step with backend/services/audio_service.py, which this file's
+logic was promoted into: standardization is unconditional here now too
+(CLAUDE.md rule 1 — "FFmpeg preprocessing is ALWAYS ON"), and denoising
+is FFmpeg's afftdn filter, not the old pyrnnoise/RNNoise round-trip that
+broke against current audiolab/PyAV (see docs/paper-vs-implementation.md
+§3.3).
 """
 
 import argparse
@@ -30,14 +36,43 @@ from diarize_audio import (
 )
 
 SAMPLE_RATE = 16000
-RNNOISE_SAMPLE_RATE = 48000
+# Same afftdn defaults as backend/services/audio_service.py's DENOISE_FILTER —
+# an unvalidated starting point, tune against real noisy classroom audio.
+DENOISE_FILTER = "afftdn=nr=12:nf=-25:tn=1"
+
+
+def standardize_audio(input_path: Path, output_path: Path) -> Path:
+    """
+    FFmpeg: any input -> 16kHz mono PCM WAV + loudnorm. Always runs, no
+    toggle (CLAUDE.md rule 1). Mirrors audio_service.ingest_audio(). Even
+    an already-preprocessed WAV benefits: Whisper's repetition-loop
+    hallucination on a short truncated clip is sensitive to the exact
+    waveform, and normalizing here is what keeps it stable.
+    """
+    if not input_path.exists():
+        raise FileNotFoundError(f"No audio file found at: {input_path}")
+
+    command = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-ar", str(SAMPLE_RATE),
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        "-af", "loudnorm",
+        str(output_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg standardization failed on '{input_path.name}': {result.stderr.strip()}")
+
+    return output_path
 
 
 def clean_audio(input_path: Path, enable_denoise: bool = False) -> Path:
     """
-    Optionally runs RNNoise denoising. When enable_denoise is False,
-    returns the input path unchanged and does no work at all — skipping
-    this stage costs nothing, which is the whole point of a toggle.
+    Optionally runs FFmpeg's afftdn (FFT denoise) in place at 16kHz. When
+    enable_denoise is False, returns the input path unchanged and does no
+    work at all — skipping this stage costs nothing, the point of a toggle.
     """
     if not input_path.exists():
         raise FileNotFoundError(f"No audio file found at: {input_path}")
@@ -45,45 +80,22 @@ def clean_audio(input_path: Path, enable_denoise: bool = False) -> Path:
     if not enable_denoise:
         return input_path
 
-    try:
-        from pyrnnoise import RNNoise
-    except ImportError:
-        raise RuntimeError(
-            "pyrnnoise is not installed. Install with 'pip install pyrnnoise', "
-            "or call with enable_denoise=False to skip this stage."
-        )
-
-    upsampled_path = input_path.with_name(input_path.stem + "_48k.wav")
-    denoised_48k_path = input_path.with_name(input_path.stem + "_48k_denoised.wav")
     cleaned_path = input_path.with_name(input_path.stem + "_cleaned.wav")
-
-    _run_ffmpeg_resample(input_path, upsampled_path, RNNOISE_SAMPLE_RATE)
-
-    denoiser = RNNoise(sample_rate=RNNOISE_SAMPLE_RATE)
-    for _ in denoiser.denoise_wav(str(upsampled_path), str(denoised_48k_path)):
-        pass
-
-    _run_ffmpeg_resample(denoised_48k_path, cleaned_path, SAMPLE_RATE)
-
-    upsampled_path.unlink(missing_ok=True)
-    denoised_48k_path.unlink(missing_ok=True)
-
-    return cleaned_path
-
-
-def _run_ffmpeg_resample(input_path: Path, output_path: Path, target_sample_rate: int) -> None:
-    """Private helper: shared ffmpeg resample used only by clean_audio()'s RNNoise round-trip."""
     command = [
         "ffmpeg", "-y",
         "-i", str(input_path),
-        "-ar", str(target_sample_rate),
+        "-af", DENOISE_FILTER,
+        "-ar", str(SAMPLE_RATE),
         "-ac", "1",
         "-c:a", "pcm_s16le",
-        str(output_path),
+        str(cleaned_path),
     ]
     result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg resample to {target_sample_rate}Hz failed: {result.stderr.strip()}")
+        cleaned_path.unlink(missing_ok=True)
+        raise RuntimeError(f"ffmpeg denoise (afftdn) failed on '{input_path.name}': {result.stderr.strip()}")
+
+    return cleaned_path
 
 
 def detect_speech(audio_path: Path, enable_vad: bool = True) -> tuple[np.ndarray, list[dict]]:
@@ -228,8 +240,9 @@ def process_pipeline(
     num_speakers: int | None = None,
 ) -> dict:
     """
-    Orchestrates the configurable stage: clean_audio -> detect_speech ->
-    transcribe_audio -> (optional) diarization + speaker merge.
+    Orchestrates the pipeline: standardize_audio (always) -> clean_audio
+    (optional) -> detect_speech -> transcribe_audio -> (optional)
+    diarization + speaker merge.
 
     diarization_model, like whisper_model, must already be loaded and
     passed in — loading pyannote's pipeline is expensive and should
@@ -241,27 +254,39 @@ def process_pipeline(
     """
     if enable_diarization and diarization_model is None:
         raise ValueError("enable_diarization=True requires a loaded diarization_model.")
+    if not input_path.exists():
+        raise FileNotFoundError(f"No audio file found at: {input_path}")
 
-    cleaned_path = clean_audio(input_path, enable_denoise)
-    waveform, speech_segments = detect_speech(cleaned_path, enable_vad)
-    result = transcribe_audio(whisper_model, waveform, speech_segments)
+    standardized_path = None
+    cleaned_path = None
+    try:
+        standardized_path = standardize_audio(input_path, input_path.with_name(input_path.stem + "_std.wav"))
+        cleaned_path = clean_audio(standardized_path, enable_denoise)
+        waveform, speech_segments = detect_speech(cleaned_path, enable_vad)
+        result = transcribe_audio(whisper_model, waveform, speech_segments)
 
-    if enable_diarization:
-        raw_speaker_segments = run_diarization_stage(diarization_model, cleaned_path, num_speakers=num_speakers)
-        speaker_segments = format_speaker_segments(raw_speaker_segments)
-        result["whisper_segments"] = merge_transcript_with_speakers(result["whisper_segments"], speaker_segments)
-        result["speaker_segments"] = speaker_segments
-    else:
-        result["speaker_segments"] = []
+        if enable_diarization:
+            raw_speaker_segments = run_diarization_stage(diarization_model, cleaned_path, num_speakers=num_speakers)
+            speaker_segments = format_speaker_segments(raw_speaker_segments)
+            result["whisper_segments"] = merge_transcript_with_speakers(result["whisper_segments"], speaker_segments)
+            result["speaker_segments"] = speaker_segments
+        else:
+            result["speaker_segments"] = []
 
-    return result
+        return result
+    finally:
+        # Clean up the FFmpeg intermediates regardless of outcome — the input
+        # file the caller passed in is left untouched.
+        for temp_path in (cleaned_path, standardized_path):
+            if temp_path is not None and temp_path != input_path:
+                temp_path.unlink(missing_ok=True)
 
 
 def main() -> None:
     """CLI entry point for manual testing only."""
-    parser = argparse.ArgumentParser(description="Run the configurable RNNoise/VAD/diarization -> Whisper pipeline.")
-    parser.add_argument("audio_file", type=str, help="Path to a preprocessed 16kHz mono WAV file.")
-    parser.add_argument("--denoise", action="store_true", help="Enable RNNoise denoising before VAD.")
+    parser = argparse.ArgumentParser(description="Run the configurable denoise/VAD/diarization -> Whisper pipeline.")
+    parser.add_argument("audio_file", type=str, help="Path to an audio file (any format FFmpeg can read; standardized before use).")
+    parser.add_argument("--denoise", action="store_true", help="Enable FFmpeg afftdn denoising before VAD.")
     parser.add_argument("--no-vad", action="store_true", help="Skip Silero VAD; transcribe the whole file as one segment.")
     parser.add_argument("--diarize", action="store_true", help="Enable pyannote diarization and merge speaker labels into the transcript.")
     parser.add_argument("--hf-token", type=str, default=None, help="Hugging Face token, required only with --diarize (or set HF_TOKEN env var).")

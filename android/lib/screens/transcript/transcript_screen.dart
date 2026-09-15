@@ -172,6 +172,13 @@ class _TranscriptScreenState extends State<TranscriptScreen> {
 
     final lowerText = text.toLowerCase();
     final lowerQuery = _query.toLowerCase();
+    // Index math below assumes lowercasing is length-preserving so offsets in
+    // lowerText map 1:1 onto `text`. A handful of Unicode chars break that
+    // (ß/ẞ, Turkish İ, some ligatures) — indexing `text` by a lowerText offset
+    // would then mis-slice or throw RangeError. Skip the highlight in that
+    // (near-impossible for HIL/FIL/ENG classroom text) case rather than risk it.
+    if (lowerText.length != text.length || lowerQuery.length != _query.length) return Text(text);
+
     final spans = <TextSpan>[];
     var start = 0;
 
@@ -183,10 +190,10 @@ class _TranscriptScreenState extends State<TranscriptScreen> {
       }
       spans.add(TextSpan(text: text.substring(start, index)));
       spans.add(TextSpan(
-        text: text.substring(index, index + _query.length),
+        text: text.substring(index, index + lowerQuery.length),
         style: const TextStyle(backgroundColor: Colors.yellow, fontWeight: FontWeight.bold),
       ));
-      start = index + _query.length;
+      start = index + lowerQuery.length;
     }
 
     return RichText(text: TextSpan(style: DefaultTextStyle.of(context).style, children: spans));

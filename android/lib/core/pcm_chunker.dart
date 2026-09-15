@@ -95,10 +95,21 @@ class PcmChunker {
   }
 
   /// Call when recording stops: emits whatever partial audio is left
-  /// buffered as one final (usually short) record, or null if the buffer
-  /// is empty (e.g. stop landed exactly on a chunk boundary).
+  /// buffered as one final (usually short) record, or null if the buffer is
+  /// empty (stop landed exactly on a chunk boundary) or holds less than a
+  /// single VAD frame's worth of audio. That floor matters: a stop landing a
+  /// few bytes past a boundary would otherwise ship a ~1ms "WAV" the server's
+  /// FFmpeg step rejects as empty, surfacing a spurious "chunk error" to the
+  /// user at the end of an otherwise clean session — and there's nothing in
+  /// sub-frame audio for either the VAD or Whisper to work with anyway.
   ({Uint8List wav, bool shouldSend})? flush() {
-    if (_buffer.isEmpty) return null;
+    final frameSize = bytesPerSample * numChannels;
+    final minBytes = frameSize *
+        (sampleRate * vad.frameDuration.inMicroseconds / Duration.microsecondsPerSecond).round();
+    if (_buffer.length < minBytes) {
+      _buffer = Uint8List(0);
+      return null;
+    }
     final result = _gate(_buffer);
     _buffer = Uint8List(0);
     return result;

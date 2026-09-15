@@ -140,7 +140,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark per-stage pipeline latency and RTF.")
     parser.add_argument("audio_file", type=str, help="Path to a preprocessed 16kHz mono WAV file.")
     parser.add_argument("--runs", type=int, default=3, help="Number of repetitions (default: 3).")
-    parser.add_argument("--denoise", action="store_true", help="Enable RNNoise denoising.")
+    parser.add_argument("--denoise", action="store_true", help="Enable FFmpeg afftdn denoising.")
     parser.add_argument("--no-vad", action="store_true", help="Skip Silero VAD.")
     parser.add_argument("--no-plot", action="store_true", help="Skip writing the bar chart.")
     args = parser.parse_args()
