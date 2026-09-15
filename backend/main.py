@@ -47,6 +47,29 @@ async def lifespan(app: FastAPI):
         _logger.info("Sentry initialized.")
 
     init_db()
+
+    if settings.celery_broker_url is None:
+        # Eager mode (no CELERY_BROKER_URL): every "worker" task actually runs inline, in THIS
+        # process, on whichever request first triggers one -- there's no separate preloaded worker
+        # process to have paid the model-load cost already. Left lazy, that first request pays the
+        # full cost (~7.5s measured: Whisper + SpeechBrain + Silero) synchronously, blocking this
+        # process's single-threaded event loop for the whole duration. For a WS streaming request
+        # specifically, that's long enough to trip the client's own keepalive ping timeout --
+        # reproduced directly: scripts/ws_smoke_test.py's first run against a cold eager-mode
+        # backend failed with `ConnectionClosedError: ... keepalive ping timeout`; an immediate
+        # retry (models now warm) passed cleanly. See docs/TROUBLESHOOTING.md.
+        #
+        # Paying that cost here instead -- once, at startup, before the app accepts any traffic --
+        # means it never happens mid-request. This mirrors what a real (non-eager) worker process
+        # already does via celery_app.py's worker_process_init signal; it's a pure no-op for the
+        # "real" split-process deployment, since celery_broker_url IS set there and this whole
+        # branch never runs (the API process still never loads a model in that configuration).
+        from backend.worker.celery_app import get_worker_models
+
+        _logger.info("Eager mode detected (no CELERY_BROKER_URL) -- preloading ML models at startup...")
+        get_worker_models()
+        _logger.info("ML models preloaded.")
+
     _logger.info(f"Scaitale API starting up (environment={settings.environment}).")
     yield
     _logger.info("Scaitale API shutting down.")
