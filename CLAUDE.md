@@ -15,8 +15,13 @@
 > Companion documents (all in `docs/`, all written in this same pass, all cross-referenced from
 > here rather than duplicated): **ARCHITECTURE.md**, **BACKEND.md**, **FRONTEND.md**,
 > **ML_PIPELINE.md**, **SETUP.md**, **API.md**, **TROUBLESHOOTING.md**, **DEVELOPMENT.md**,
-> **PROJECT_INVENTORY.md**, **CHANGE_HISTORY.md**. If you are a new developer or a new AI
-> assistant picking this project up cold with zero prior context, read **this Part 1 in full**,
+> **PROJECT_INVENTORY.md**, **CHANGE_HISTORY.md**, **COLD_START_VERIFICATION.md**,
+> **ARCHITECTURE_DECISIONS.md** (the *why* behind every significant technical choice in this
+> codebase — read it before proposing to replace a library or rearchitect a stage; it also names,
+> honestly, which decisions have no recorded reasoning at all), and **FINAL_HANDOFF.md** (the
+> single terse, no-fluff distillation of everything else — 20 blunt questions answered, meant to be
+> read first in a genuine emergency, before any of the longer docs). If you are a new developer or a
+> new AI assistant picking this project up cold with zero prior context, read **this Part 1 in full**,
 > then jump into whichever companion doc matches your task — the "Safe Modification Guide" in
 > `docs/DEVELOPMENT.md` tells you exactly which file to open for a given change.
 
@@ -1101,4 +1106,9 @@ flutter test
 ---
 *Part 3 added 2026-09-15, alongside `docs/ARCHITECTURE.md`, `docs/BACKEND.md`, `docs/FRONTEND.md`,
 `docs/ML_PIPELINE.md`, `docs/SETUP.md`, `docs/API.md`, `docs/TROUBLESHOOTING.md`,
-`docs/DEVELOPMENT.md`, `docs/PROJECT_INVENTORY.md`, `docs/CHANGE_HISTORY.md`.*
+`docs/DEVELOPMENT.md`, `docs/PROJECT_INVENTORY.md`, `docs/CHANGE_HISTORY.md`, and
+`docs/COLD_START_VERIFICATION.md`. `docs/ARCHITECTURE_DECISIONS.md` (the rationale behind every
+significant technical decision — what was chosen, what alternatives existed, why, and what's
+honestly unrecorded) and `docs/FINAL_HANDOFF.md` (20 blunt, brutally factual questions answered —
+what's actually done, what's dangerous to touch, what breaks, what to do with 30 minutes vs. one
+day vs. one week) were both added 2026-09-17, as the last two documents in this set.*
