@@ -1,6 +1,352 @@
-# CLAUDE.md — Scaitale (ScAItale)
-> Single source of truth for all AI-assisted development sessions.
-> Read this file at the start of every Claude Code session before touching any code.
+# PART 1 — HANDOFF ORIENTATION (read this first)
+
+> **This part was written 2026-09-15 as a from-scratch reverse-engineering pass** — every claim in
+> it was checked directly against the repository's actual files, the actual installed package
+> versions in `.venv` (`pip freeze`), and two real, just-run validation commands (`pytest tests/ -v`
+> → **90 passed, 1 skipped**, confirmed this run; `import backend.main` → confirmed it pulls in no
+> torch/faster-whisper/pyannote/speechbrain/silero_vad), not carried forward from an older summary.
+> Everything below is either **VERIFIED** (read directly from a file or command output),
+> **INFERRED** (a reasonable conclusion from verified facts, not itself directly stated anywhere),
+> or explicitly marked **PLANNED / NOT IMPLEMENTED** / **UNKNOWN**. Part 2, below the second `---`,
+> is the pre-existing detailed development record (rounds 1–11, production-architecture writeup)
+> — it is kept intact, not superseded; where the two disagree, Part 2 is usually the more granular
+> and more recently-touched one, so treat this Part 1 as the map and Part 2 as the territory.
+>
+> Companion documents (all in `docs/`, all written in this same pass, all cross-referenced from
+> here rather than duplicated): **ARCHITECTURE.md**, **BACKEND.md**, **FRONTEND.md**,
+> **ML_PIPELINE.md**, **SETUP.md**, **API.md**, **TROUBLESHOOTING.md**, **DEVELOPMENT.md**,
+> **PROJECT_INVENTORY.md**, **CHANGE_HISTORY.md**, **COLD_START_VERIFICATION.md**,
+> **ARCHITECTURE_DECISIONS.md** (the *why* behind every significant technical choice in this
+> codebase — read it before proposing to replace a library or rearchitect a stage; it also names,
+> honestly, which decisions have no recorded reasoning at all), and **FINAL_HANDOFF.md** (the
+> single terse, no-fluff distillation of everything else — 20 blunt questions answered, meant to be
+> read first in a genuine emergency, before any of the longer docs). If you are a new developer or a
+> new AI assistant picking this project up cold with zero prior context, read **this Part 1 in full**,
+> then jump into whichever companion doc matches your task — the "Safe Modification Guide" in
+> `docs/DEVELOPMENT.md` tells you exactly which file to open for a given change.
+
+## A. Project Identity
+
+**What it is.** Scaitale (working thesis title: *"Development and Evaluation of a Noise-Aware
+Code-Switching Multilingual Speech Recognition and Automated Summarization System for Hiligaynon
+Classroom Discourse"*) is a thesis prototype — a Flutter Android app plus a Python backend — that
+records a classroom discussion, transcribes it (Hiligaynon, Filipino, and English, code-switched
+freely within the same session), identifies which parts of the transcript were spoken by an
+enrolled teacher, and generates a structured "minutes" document (topics, key points, definitions,
+action items) from the transcript. **VERIFIED** — `CLAUDE.md`'s pre-existing "What This Project
+Is" section below, cross-checked against the actual running code throughout this pass.
+
+**What problem it solves.** Philippine classrooms in this target region routinely mix three
+languages in one sentence. Off-the-shelf transcription tools handle single-language audio well and
+code-switched multilingual audio poorly; this project's core bet is that a general-purpose
+multilingual ASR model (Whisper), given enough targeted adaptation, can do meaningfully better on
+this specific code-switching pattern than a generic consumer transcription app — and that
+automatically surfacing *what the teacher said* (as opposed to ambient classroom noise/side talk)
+makes the resulting record actually useful for review. **VERIFIED** — thesis framing, matches the
+system's actual architecture (a dedicated teacher-verification stage exists; see Part C below).
+
+**Who uses it.** A teacher (records the session, enrolls their own voice once, reviews transcripts/
+minutes afterward) and, implicitly, students (who benefit from the resulting minutes/transcript as
+a study aid) — there is currently exactly one account "role" in the code (`backend/models/user.py`'s
+`User`), with no teacher/student/admin distinction. Any authenticated account can record sessions,
+enroll teacher voice profiles, and view/delete anything scoped to its own `owner_id`. **VERIFIED**
+(`backend/models/user.py`, every `backend/api/*.py` route's `Depends(get_current_user)` +
+`owner_id` filtering) — per-role access is explicitly listed as **PLANNED / NOT IMPLEMENTED** in
+`docs/future_ideas.md`.
+
+**What the frontend does.** A Flutter Android app (`android/`) — records microphone audio, streams
+it to the backend over a WebSocket in near-real-time, shows a live-updating transcript while
+recording, and after the session ends lets the user browse the full timestamped transcript
+(with search), view the generated minutes, enroll/manage teacher voice profiles, and adjust
+processing settings. **VERIFIED** — see `docs/FRONTEND.md` for the complete screen-by-screen
+breakdown.
+
+**What the backend does.** A two-process Python system: a lightweight FastAPI "API tier"
+(`backend/main.py`) that handles HTTP/WebSocket traffic, authentication, and database reads/writes,
+but runs **zero** machine-learning inference itself; and a separate Celery "worker tier"
+(`backend/worker/`) that does all the actual audio processing (denoising, voice-activity detection,
+transcription, diarization, speaker verification) and reports results back to the API tier via a
+pub/sub channel. This split exists specifically so a slow ML inference call never blocks the HTTP/
+WebSocket server. **VERIFIED** — `backend/main.py`'s docstring, `backend/worker/celery_app.py`,
+confirmed empirically this pass (`import backend.main` pulls in no ML library).
+
+**External services/models/libraries it uses** (full detail in `docs/ML_PIPELINE.md` and the Tech
+Stack table below): FFmpeg (audio format conversion + denoising), Silero VAD (speech detection),
+Faster-Whisper `small` (speech-to-text), pyannote.audio (optional multi-speaker diarization, gated
+behind a Hugging Face account + token), SpeechBrain's ECAPA-TDNN (teacher voice verification),
+NetworkX-based TextRank (keyword extraction), and a hand-written rule-based minutes generator (no
+LLM, no external summarization API — this is a deliberate, verifiable architectural fact, not an
+oversight; see `docs/ML_PIPELINE.md`).
+
+## B. Architecture — the ACTUAL flow, traced from the code
+
+The version below replaces any generic assumed pipeline — it was built by reading
+`backend/api/transcribe.py`, `backend/worker/tasks.py`, `backend/services/audio_service.py`, and
+`android/lib/screens/recording/live_recording_screen.dart` directly, not inferred from naming.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  FLUTTER APP (android/lib/)                                                  │
+│  live_recording_screen.dart records mic audio via the `record` package,      │
+│  chunks it into fixed-duration WAV blobs (pcm_chunker.dart), gates each      │
+│  chunk through a cheap on-device energy VAD (local_vad.dart) before sending  │
+└───────────────────────────────┬───────────────────────────────────────────--┘
+                                 │  WebSocket  wss://<host>/api/v1/ws/transcribe?token=<JWT>
+                                 │  (or HTTP POST /api/v1/transcribe for a whole-file upload)
+                                 ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│  API TIER — one process: `uvicorn backend.main:app`                         │
+│  backend/api/transcribe.py's WS handler: NO ML code runs here.              │
+│  Each binary chunk -> transcribe_chunk_task.delay(...) (enqueue, don't wait)│
+│  A background loop (listen_results()) subscribes to Redis/in-proc pub/sub   │
+│  and forwards each finished chunk's result back over the same socket.       │
+│  On the "end" control frame: session_service.finalize_session() runs        │
+│  RIGHT HERE (not on the worker) — TextRank keywords + rule-based minutes,   │
+│  both pure-Python/NetworkX, no torch needed — then the full result is sent  │
+│  back as one "session_ended" WS message.                                    │
+└───────────────────────────────┬──────────────────────────────────────────--┘
+                                 │  Celery task enqueue (Redis broker, or in-process
+                                 │  "eager" mode — same process — if no broker is configured)
+                                 ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│  WORKER TIER — a separate process: `celery -A backend.worker.celery_app     │
+│  worker`. Loads every ML model ONCE per worker process (worker_process_init │
+│  signal), then reuses them for every task. This is the only process that   │
+│  ever imports torch/faster-whisper/pyannote/speechbrain.                    │
+│                                                                              │
+│  backend/services/audio_service.py: run_pipeline() — per chunk/file:        │
+│   1. ingest_audio()     FFmpeg -> 16kHz mono WAV + loudnorm   [ALWAYS ON]   │
+│   2. clean_audio()      FFmpeg `afftdn` filter (denoise)      [toggle]      │
+│   3. detect_speech()    Silero VAD -> speech-only time spans  [toggle]      │
+│   4. transcribe_audio() Faster-Whisper, per VAD span, then                  │
+│                         glossary.apply() immediately per segment            │
+│   5. diarize_audio()    pyannote.audio -> "Speaker A/B/C" labels [toggle,   │
+│                         needs HF_TOKEN, OFF by default]                     │
+│   6. apply_teacher_verification()  SpeechBrain ECAPA embedding,             │
+│                         cosine similarity vs. enrolled teacher(s) [toggle]  │
+│                                                                              │
+│  Result dict published to `session:{id}:results` (Redis pub/sub, or an     │
+│  in-process asyncio.Queue when there's no broker) for the API tier to pick │
+│  up and relay to the Flutter socket.                                       │
+└───────────────────────────────┬──────────────────────────────────────────--┘
+                                 │  DB writes happen from BOTH tiers, via SQLAlchemy,
+                                 │  against the same DATABASE_URL (SQLite file by default,
+                                 │  Postgres in the "real" deployment path)
+                                 ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│  DATABASE — one denormalized `sessions` row per recording (JSON columns    │
+│  for segments/keywords/minutes), one `teacher_enrollments` row per         │
+│  enrolled voice, one `users` row per account. No separate tables for       │
+│  individual transcript segments — see docs/BACKEND.md §Database.           │
+└────────────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼  the WS "session_ended" message (or the client polling
+                                    GET /api/v1/sessions/{id} after a whole-file upload)
+                     back to the Flutter app — Transcript screen, Minutes screen, export
+```
+
+**What this is NOT** (corrections to the generic assumption a fresh reader might otherwise make):
+there is no dedicated always-on "speaker diarization" stage — diarization is one optional toggle,
+off by default, and teacher identification does **not** depend on it (it slices the waveform by
+Whisper's own segment timestamps, not by diarized speaker turns — see `docs/ML_PIPELINE.md`).
+There is no LLM anywhere in this pipeline — "summarization" is a hand-written rule-based extractor
+(topic blocks by silence-gap, TextRank keywords, regex-pattern definitions/action-items), not a
+generative model call. Minutes generation runs in the **API** process, not the worker, because it's
+cheap enough (pure Python + NetworkX) not to need the ML-heavy process.
+
+## C. Technology Stack — actual, verified versions
+
+Backend versions below are the exact versions **currently installed in this repo's own
+`.venv`** (`.venv/Scripts/python.exe -m pip freeze`, run this pass) — `requirements.txt` itself
+deliberately pins nothing (see its own header comment: "Intentionally unpinned while the
+environment is still in flux"), so these are what's *actually on disk right now*, not a promise
+about what a fresh install would resolve to months from now. Flutter/Dart versions are from
+`flutter --version` / `dart --version`, run this pass on this machine.
+
+| Technology | Version (this machine, verified) | Where used | Why | Required to run? |
+|---|---|---|---|---|
+| Python | 3.11.9 | Entire backend | `faster-whisper`/`torch` ecosystem compatibility at time of writing | **REQUIRED** |
+| Flutter SDK | 3.47.2 (stable channel) | `android/` | Client framework; pinned exactly in `.github/workflows/ci.yml` | **REQUIRED** (client) |
+| Dart SDK | 3.13.2 | `android/` (bundled with the Flutter SDK above) | Language `android/pubspec.yaml` targets (`sdk: ^3.13.2`) | **REQUIRED** (client) |
+| FastAPI | 0.141.1 | `backend/main.py` + every `backend/api/*.py` | HTTP/WebSocket framework | **REQUIRED** |
+| Uvicorn | 0.52.4 | ASGI server that runs FastAPI | Standard FastAPI companion | **REQUIRED** |
+| `websockets` | 17.1 | Underlies FastAPI's WS support | WS transport for `/ws/transcribe` | **REQUIRED** |
+| SQLAlchemy | 2.0.51 | `backend/database/`, `backend/models/` | ORM, works against both SQLite and Postgres | **REQUIRED** |
+| Alembic | 1.18.5 | `backend/database/migrations/` | Schema migrations (Postgres path only — SQLite dev path auto-creates tables) | REQUIRED for Postgres; not needed for SQLite dev |
+| psycopg (v3) | 3.3.4 | Postgres driver | Only touched if `DATABASE_URL` points at Postgres | OPTIONAL (SQLite is the default) |
+| PyJWT | 2.13.0 | `backend/core/security.py` | Issues/verifies the bearer token every route requires | **REQUIRED** |
+| bcrypt | 5.0.0 | `backend/core/security.py` | Password hashing (used directly, NOT via passlib — see `docs/TROUBLESHOOTING.md`) | **REQUIRED** |
+| Celery | 5.6.3 | `backend/worker/` | Task queue between API and worker tiers | **REQUIRED** |
+| redis (client lib) | 8.1.0 | `backend/core/pubsub.py`, Celery broker | Pub/sub + task broker; a real Redis/Memurai server is OPTIONAL — no broker configured = in-process "eager" mode | OPTIONAL (eager mode works with zero Redis install) |
+| FFmpeg | 8.1.2 (gyan.dev "essentials" build, this machine) | Every audio-touching path, via `subprocess` | Format conversion (always on) + `afftdn` denoise filter | **REQUIRED** — not a Python package, must be on PATH |
+| Silero VAD (`silero-vad` pkg) | 6.2.1 | `backend/services/audio_service.py: detect_speech()` | Speech/non-speech segmentation | **REQUIRED** for VAD toggle (on by default) |
+| Faster-Whisper | 1.2.1 | `backend/services/audio_service.py: transcribe_audio()` | Speech-to-text, model size "small", int8, CPU | **REQUIRED** — this is the core function of the app |
+| CTranslate2 | 4.8.1 | Underlies faster-whisper | Whisper inference runtime | **REQUIRED** (installed transitively) |
+| pyannote.audio | 4.0.7 | `backend/services/diarization_service.py` | Optional multi-speaker diarization | OPTIONAL — off by default, needs `HF_TOKEN` |
+| SpeechBrain | 1.1.1 | `backend/services/teacher_verification_service.py` | ECAPA-TDNN speaker embedding + cosine similarity | REQUIRED for teacher-ID toggle (present but toggleable) |
+| PyTorch | 2.13.0**+cpu** | Backs faster-whisper, silero-vad, pyannote, speechbrain | Tensor runtime | **REQUIRED** — **this exact venv's build is CPU-only; see note below** |
+| torchaudio | 2.11.0 | Audio tensor loading, pulled in by the above | — | **REQUIRED** (transitive) |
+| NetworkX | 3.6.1 | `backend/services/keyword_service.py` | TextRank keyword graph + PageRank | **REQUIRED** |
+| slowapi | 0.1.10 | `backend/core/rate_limit.py` | Rate limiting on login/transcribe/enroll | **REQUIRED** |
+| prometheus-fastapi-instrumentator | 8.1.0 | `backend/main.py` | Exposes `/metrics` | REQUIRED for that endpoint; app runs without it mattering functionally |
+| sentry-sdk | 2.68.1 | `backend/main.py` (conditional) | Error reporting | OPTIONAL — no-op unless `SENTRY_DSN` is set |
+| transformers | 5.16.1 | `ai/finetuning/` only | Base model loading for LoRA fine-tuning | OPTIONAL — only needed to actually run fine-tuning, not to run the app |
+| peft | 0.20.0 | `ai/finetuning/finetune_whisper.py` | LoRA adapter training | OPTIONAL — fine-tuning only |
+| accelerate | 1.14.0 | `ai/finetuning/` | Training loop helper | OPTIONAL — fine-tuning only |
+| datasets (HF) | 5.0.1 | `ai/finetuning/` | Loads the training corpus | OPTIONAL — fine-tuning only |
+| pandas | 3.0.3 | Listed in `requirements.txt`'s "Evaluation" block | Planned evaluation reporting | **INFERRED not currently used** — grepped every `.py` file in the repo, zero imports found |
+| scipy, matplotlib, psutil | 1.17.1 / 3.11.1 / 7.2.2 | `evaluation/*.py` | Stats/plots/resource sampling for the evaluation scripts | OPTIONAL — only needed to run `evaluation/` scripts |
+| pytest | 9.1.1 | `tests/` | Backend test runner | ONLY REQUIRED FOR DEVELOPMENT |
+| RNNoise / `pyrnnoise` | — **NOT INSTALLED, NOT USED** | — | Was the original denoiser; replaced by FFmpeg's `afftdn` filter (round 8, PM decision) after it broke irreparably against this project's other dependencies | **NOT PART OF THE CURRENT SYSTEM** — see `docs/TROUBLESHOOTING.md` if you see stale references to it |
+| WhisperX | — **NOT USED ANYWHERE** | — | Never adopted; this project uses faster-whisper directly | N/A |
+| python-docx | — **NOT USED ANYWHERE** | — | Minutes export is Markdown/plain-text (`backend/api/minutes.py`), not a `.docx` file, despite this appearing in some early conceptual-framework drafts | N/A |
+| Database engine | SQLite (dev default) / PostgreSQL 16 (docker-compose / CI / "real" deployment) | `backend/database/db.py` | See `docs/BACKEND.md` §Database | SQLite: **REQUIRED nothing extra** (bundled with Python). Postgres: OPTIONAL, for the "real stack" path |
+| Redis / Memurai | 7-alpine (compose/CI), or Memurai on Windows dev | Celery broker + pub/sub | See above | OPTIONAL |
+| CUDA / cuDNN | **NOT INSTALLED / NOT USED by the installed torch build** | — | See note below | **NOT REQUIRED** — see note |
+| NVIDIA driver | Present on this dev machine (RTX 3050, driver reports CUDA UMD 13.4 via `nvidia-smi`) | — | Not consumed by anything in this codebase currently | **NOT REQUIRED, NOT CURRENTLY USED** |
+| Node/npm | **NOT USED ANYWHERE IN THIS REPO** | — | No JS/TS tooling exists in this project | N/A |
+| Java/JDK | 23.0.1 (this machine) | Android Gradle build | Gradle 9.3.1 (see `android/android/gradle/wrapper/gradle-wrapper.properties`) targets Java 17 bytecode (`compileOptions`/`kotlin.jvmTarget` in `app/build.gradle.kts`) even while running on a JDK 23 host JVM — this combination has produced a working debug build on this machine (evidence: populated `android/build/` output) | **REQUIRED** for Android builds only |
+
+**GPU/CUDA note — read this before assuming the RTX 3050 is being used for anything.**
+`torch.__version__` in this exact `.venv` reports `2.13.0+cpu`, `torch.version.cuda` is `None`, and
+`torch.cuda.is_available()` returns `False` — **confirmed by direct execution this pass.**
+`nvidia-smi` confirms the physical GPU and its driver are present and working (RTX 3050, 4096MiB
+VRAM, idle) — so the machine *could* run a CUDA build, but the specific PyTorch wheel installed in
+this `.venv` is the CPU-only build, and grepping the entire `backend/` tree found zero references
+to `cuda`, `gpu`, or `.to(device)` anywhere in application code (`WHISPER_DEVICE` defaults to
+`"cpu"` and is the only device-selection knob that exists at all, for Whisper specifically —
+SpeechBrain and pyannote have no such knob in this codebase and would need code changes to run on
+GPU). **Every measured performance number in this project's history (see `docs/ML_PIPELINE.md`) is
+a CPU number.** To actually use the GPU, both a CUDA-enabled `torch` reinstall AND code changes
+(passing a device argument where none currently exists) would be needed — see `docs/SETUP.md` for
+what that would involve and `docs/ML_PIPELINE.md` §Performance for what to expect if you do.
+
+## D. Directory Map
+
+```
+academic-discussion-assistant/
+├── backend/                  Python backend. See docs/BACKEND.md for a module-by-module tour.
+│   ├── main.py                FastAPI entry point (the API tier). Run: uvicorn backend.main:app
+│   ├── api/                   HTTP + WS route handlers (auth, transcribe, sessions, teacher, minutes)
+│   ├── core/                  config.py (all env vars), security.py (JWT/bcrypt), logging.py,
+│   │                          rate_limit.py, request_context.py, pubsub.py
+│   ├── services/               audio_service.py (pipeline orchestrator), diarization_service.py,
+│   │                          teacher_verification_service.py, glossary_service.py,
+│   │                          keyword_service.py, minutes_service.py, session_service.py,
+│   │                          user_service.py
+│   ├── worker/                 celery_app.py (worker entry point + model loading),
+│   │                          tasks.py (the actual Celery task functions)
+│   ├── models/                 SQLAlchemy ORM: session.py, teacher.py, user.py
+│   ├── schemas/                Pydantic request/response schemas
+│   ├── database/               db.py (engine/session setup), migrations/ (Alembic, Postgres only)
+│   └── data/glossary.json      The trilingual term-correction glossary (hand-edited)
+│   DEPENDS ON: FFmpeg on PATH; a DATABASE_URL (or SQLite default); optionally Redis + HF_TOKEN.
+│   MODIFY FREELY — this is the actively-developed core. Nothing here is generated.
+│
+├── android/                  Flutter client. See docs/FRONTEND.md for a file-by-file tour.
+│   ├── lib/                    App source: main.dart, app.dart, core/, models/, screens/, widgets/
+│   ├── test/                   Dart unit + widget tests — **verified this pass, right now, on
+│   │                          this machine**: `flutter analyze` → "No issues found! (ran in
+│   │                          135.1s)"; `flutter test` → "69: All tests passed!"
+│   ├── android/                 Native Android project (Gradle, manifest, local.properties) —
+│   │                          MODIFY ONLY for platform-level config (permissions, signing, SDK
+│   │                          versions); DO NOT hand-edit generated Gradle caches
+│   └── build/                  GENERATED — build output. Safe to delete; regenerated by `flutter
+│                              build`/`flutter run`. Do not commit, do not hand-edit.
+│   MODIFY FREELY under lib/ and test/. DEPENDS ON: the Flutter SDK, an Android SDK, a running
+│   backend reachable over the network the phone/emulator is on.
+│
+├── ai/finetuning/            LoRA/PEFT fine-tuning scripts for adapting Whisper to Hiligaynon.
+│                              PLANNED / NOT YET RUN — see docs/ML_PIPELINE.md. Safe to modify;
+│                              nothing else in the app imports from here at runtime.
+│
+├── evaluation/                Standalone scripts (WER/CER, teacher-ID precision/recall, latency,
+│                              SUS scoring, resource usage). Not imported by the app at runtime —
+│                              these are researcher-run tools, not production code. Safe to modify.
+│
+├── scripts/                  Dev utility scripts (record/preprocess/transcribe/diarize/simulate
+│                              standalone, plus two smoke-test scripts). NOT imported by backend/
+│                              or android/ — their logic was promoted into backend/services/ and
+│                              they're kept only as convenient one-off CLI tools. Safe to modify;
+│                              `scripts/tester` specifically is a 6-line scratch mic-test file with
+│                              no purpose beyond that — safe to delete if it's ever in your way.
+│
+├── tests/                    Backend pytest suite (16 files, 90 tests, 1 skip). MODIFY/EXTEND
+│                              freely — this is exactly where new backend test coverage belongs.
+│
+├── docs/                     This documentation set, plus pre-existing docs: DFD.md (STALE — see
+│                              its own header: written before the Flutter client existed),
+│                              DevelopmentLog.md (Nathan's own day-by-day journal, 5 entries),
+│                              future_ideas.md (explicitly out-of-scope ideas),
+│                              paper-vs-implementation.md (manuscript-vs-code discrepancy tracker
+│                              — genuinely important, read it before assuming the thesis manuscript
+│                              and the code agree on anything architectural).
+│
+├── deployment/                 Dockerfile.api, Dockerfile.worker, docker-compose.yml, .env.example.
+│                              WRITTEN TO SPEC, NEVER ACTUALLY BUILT/RUN as containers in this
+│                              sandbox (no Docker installed here) — see docs/SETUP.md. CI's own
+│                              Postgres/Redis service containers are real Docker usage, just not
+│                              of these specific Dockerfiles.
+│
+├── datasets/                 raw/ clean/ processed/ metadata/ — all EMPTY (only `.gitkeep` files).
+│                              The Hiligaynon fine-tuning corpus does not exist yet. DO NOT DELETE
+│                              these folders (fine-tuning scripts expect them to exist); safe to
+│                              populate.
+│
+├── models/                   GITIGNORED, not generated by any build step — this is where
+│                              downloaded model weights land (confirmed this pass: currently
+│                              contains a real, previously-downloaded SpeechBrain ECAPA-TDNN
+│                              checkpoint, `models/speechbrain_spkrec-ecapa-voxceleb/`). Faster-
+│                              Whisper/pyannote/Silero caches go elsewhere by default (see
+│                              docs/SETUP.md) — this folder specifically is SpeechBrain's own
+│                              `savedir`. Safe to delete; everything in it re-downloads on next use
+│                              (multi-hundred-MB re-download, not fast, but not destructive).
+│
+├── recordings/                 GITIGNORED. Where test/manual audio files go (`.wav`/`.mp3`
+│                              anywhere in the repo are gitignored globally). Contains real sample
+│                              files used during development (`classroom.wav`,
+│                              `lecture_preprocessed.wav` + chunked pieces). Safe to add to, safe
+│                              to delete individual files (nothing in the app reads a *specific*
+│                              filename from here — scripts take a path argument).
+│
+├── integration/, experiments/, transcripts/   All THREE genuinely empty (verified this pass —
+│                              zero files, not even `.gitkeep`, so not tracked by git at all
+│                              beyond existing as bare local directories). `transcripts/` IS
+│                              referenced by `backend/core/config.py`'s `transcripts_dir` setting
+│                              but nothing currently writes to it — it's created automatically at
+│                              import time (`settings.transcripts_dir.mkdir(...)`) and left unused
+│                              otherwise. `experiments/` and `integration/` have no code reference
+│                              anywhere found this pass — safe to ignore or delete.
+│
+├── CLAUDE.md                 This file — the master handoff document.
+├── README.md                 A second, more narrative project overview + setup guide — largely
+│                              consistent with this file as of the last docs-consistency pass
+│                              (commit `22d3582`), but CLAUDE.md is the one both files themselves
+│                              name as authoritative if they ever disagree.
+├── LICENSE                   An EMPTY DIRECTORY, not a file — a known, deliberately-left-open gap
+│                              (see docs/DEVELOPMENT.md). DO NOT invent license content; this is
+│                              the project owner's decision alone.
+├── requirements.txt            Full union (API + worker) — local dev / CI install target.
+├── requirements-api.txt        Lean subset — what the API-tier Docker image installs.
+├── requirements-worker.txt     Full ML subset — what the worker-tier Docker image installs.
+├── alembic.ini                Points Alembic at backend/database/migrations/.
+└── THESIS_...(4).docx        The actual manuscript. NEVER commit further changes to this file to
+                              git casually — it's already tracked (see docs/DEVELOPMENT.md for the
+                              standing rule about it) but treat it as Nathan's document, not code.
+```
+
+`.venv/` (Python virtual environment, gitignored) and `android/build/` (Flutter build output) are
+both fully regeneratable — see `docs/SETUP.md` for exact recreation commands. Neither should ever
+be hand-edited or committed.
+
+---
+
+# PART 2 — DETAILED PROJECT RECORD (pre-existing, preserved as-is)
+
+> Everything from here to the end of this file is the project's existing, incrementally-built
+> development record — an exhaustive, dated log of what was built and fixed, pass by pass. It
+> predates this reverse-engineering pass and is preserved unmodified below; Part 1 above is the
+> new "orientation for a cold start" layer sitting on top of it, not a replacement for it.
 
 ---
 
@@ -127,9 +473,10 @@ academic-discussion-assistant/
 │   ├── models/
 │   ├── utils/
 │   └── main.py
-├── ai/                       # finetuning/ only has real content (LoRA train + convert scripts) — whisper/,
-│                             # rnnoise/, silero/, pyannote/, speechbrain/ are empty, untracked leftovers from
-│                             # early planning; that wrapping logic actually lives in backend/services/ instead
+├── ai/                       # finetuning/ (LoRA train + convert scripts) is the only thing in here now — whisper/,
+│                             # rnnoise/, silero/, pyannote/, speechbrain/ were empty, untracked leftovers from
+│                             # early planning (that wrapping logic actually lives in backend/services/ instead)
+│                             # and have since been deleted from disk, not just left empty
 ├── models/                   # Trained weights/embeddings only (NO source code)
 ├── datasets/
 │   ├── raw/
@@ -139,8 +486,9 @@ academic-discussion-assistant/
 ├── recordings/
 ├── transcripts/
 ├── experiments/              # Per-experiment folders for thesis results
-├── evaluation/                # wer.py, latency.py, teacher_id.py, sus.py, resources.py — flat scripts, not the
-│                               # wer/cer/latency/ subdirectories once planned; reports/ and plots/ are real output dirs
+├── evaluation/                # wer.py, latency.py, teacher_id.py, sus.py, resources.py — flat scripts; the
+│                               # wer/cer/latency/ subdirectories once planned were empty leftovers, since deleted
+│                               # (same as ai/, above); reports/ and plots/ are the real output dirs
 ├── docs/                     # DFD.md (Level 0 + Level 1 data flow diagrams), DevelopmentLog.md, future_ideas.md, paper-vs-implementation.md
 ├── scripts/                  # Dev utilities only, NOT app code
 ├── tests/
@@ -154,16 +502,16 @@ academic-discussion-assistant/
 
 ## Six Built Scripts in `scripts/`
 
-These are dev utilities. Their logic gets promoted into `backend/services/` — not the scripts themselves.
+These are dev utilities. Their logic was promoted into `backend/services/`; the scripts were originally frozen after that, but that rule was **lifted in round 10** — they're maintained again (bug fixes, kept in step with `backend/services/` where it matters). `backend/` remains the real thing; the scripts are for local one-off runs.
 
 1. `record_test_audio.py` — mic capture → `recordings/classroom.wav` (16000 Hz mono int16)
 2. `preprocess_audio.py` — FFmpeg standardization (16kHz mono PCM WAV, loudnorm)
 3. `transcribe_audio.py` — Faster-Whisper `small`, int8 CPU, shared `load_model()`
-4. `process_pipeline.py` — full pipeline orchestrator with toggle flags; `merge_transcript_with_speakers()` built
-5. `simulate_streaming.py` — chunks file into 1–10s pieces (default 3s); full pipeline per chunk
+4. `process_pipeline.py` — full pipeline orchestrator with toggle flags. `standardize_audio()` (FFmpeg, always-on) → `clean_audio()` (afftdn, optional) → VAD → Whisper → diarize + merge. Kept in step with `audio_service.py` (round 10).
+5. `simulate_streaming.py` — chunks file into 1–10s pieces (default 3s); full pipeline per chunk. A trailing chunk ≤1s is folded into the previous one (round 10 — a sub-second chunk reliably triggers a Whisper repetition-loop).
 6. `diarize_audio.py` — standalone pyannote pipeline; maps raw labels to Speaker A/B/C by first-appearance
 
-**`process_pipeline.py` logic → `backend/services/audio_service.py`** is the first major backend build task.
+**`process_pipeline.py` logic → `backend/services/audio_service.py`** was the first major backend build task (done).
 
 ---
 
@@ -319,7 +667,11 @@ already working.
 ## Development Environment
 
 - **OS:** Windows (PowerShell)
-- **Project path:** `C:\Users\natha\OneDrive\Documents\Thesis\academic-discussion-assistant\`
+- **Project path:** `C:\Users\natha\Documents\Thesis\academic-discussion-assistant\` — **corrected
+  2026-09-15**: this line previously said `...\OneDrive\Documents\Thesis\...`; the project has
+  since moved out of OneDrive (confirmed via every command run in this repo this pass — see
+  `docs/CHANGE_HISTORY.md`, which also independently corroborates the move via `tester_terminal.txt`'s
+  old captured paths). Found and fixed during the cold-start documentation verification pass.
 - **Virtual environment:** `.venv` in project root — activate before every session
 - **FFmpeg:** installed at `C:\ffmpeg\bin`, on PATH — `ffmpeg` and `ffprobe` both available
 - **HF_TOKEN:** required for pyannote (Hugging Face gated model) — set per session with `$env:HF_TOKEN = "your_token"` or permanently via `setx`
@@ -365,7 +717,7 @@ From `process_pipeline.py` CLI flags (for reference):
 - `nf=-25` (noise floor, raised from the -50 default — classroom ambient sits above near-silence) and `tn=1` (track non-stationary noise) are an **unvalidated heuristic default**, same caveat as `teacher_verification_threshold`. Tune against real noisy classroom audio once it exists.
 - One temp file (`_cleaned.wav`), cleaned up in `run_pipeline()`'s `finally` (and in `clean_audio`'s own failure path).
 - `enable_denoise=False` (default) — opt-in, not opt-out. Covered by `tests/test_audio_denoise.py`.
-- `scripts/process_pipeline.py` (frozen pre-backend dev utility) still has the old `pyrnnoise` `clean_audio` — also broken, not fixed (scripts are frozen per this file's rule); `pip install pyrnnoise` by hand if you need that script's `--denoise`.
+- `scripts/process_pipeline.py` + `simulate_streaming.py` `--denoise` also use `afftdn` now (round 10) — the scripts-are-frozen rule was lifted so they could actually be fixed. `pyrnnoise` is no longer imported anywhere.
 
 ### Waveform loading — soundfile not torchaudio
 - `_load_waveform()` uses `soundfile` (`sf.read()`) instead of `silero_vad`'s `read_audio()`
@@ -388,7 +740,7 @@ Each segment in `whisper_segments` contains:
 
 ### process_pipeline.py CLI flags (complete)
 - `audio_file` — positional, path to preprocessed 16kHz mono WAV
-- `--denoise` — enable denoising (off by default; backend uses `afftdn`, the frozen script still references `pyrnnoise`)
+- `--denoise` — enable FFmpeg `afftdn` denoising (off by default; same filter as `audio_service.py`)
 - `--no-vad` — skip Silero VAD
 - `--diarize` — enable pyannote diarization
 - `--hf-token` — Hugging Face token (or set `HF_TOKEN` env var)
@@ -435,7 +787,7 @@ Each segment in `whisper_segments` contains:
 
 ## Known Open Issues
 
-- Flutter WebSocket integration: **built and verified end-to-end on an Android emulator** — see "Flutter Client (Built)" below. Real physical-device testing (as opposed to emulator) is still open.
+- Flutter WebSocket integration: **built and verified end-to-end on an Android emulator** — see "Flutter Client (Built)" below. Real physical-device testing (as opposed to emulator) is still open. **One prerequisite for that test found only while writing it up, not yet exercised**: every `uvicorn backend.main:app` invocation anywhere in this file/README defaults to binding `127.0.0.1` (loopback-only). That's invisible on the emulator, since `10.0.2.2` is QEMU's own alias straight back to the host's loopback — but a physical device on the real Wi-Fi NIC would be refused outright by a loopback-only listener, silently (a hang, not an error the app can show). A physical-device run needs `uvicorn backend.main:app --host 0.0.0.0 --port 8000` specifically, plus a Windows Firewall inbound-allow rule for that port.
 - Per-chunk diarization has no cross-chunk speaker continuity (restarts each chunk) — unchanged, still true for streamed WS chunks
 - Ethics/consent clearance for classroom recordings — must resolve before September recordings
 - Whisper first-segment language lock on code-switched speech — known artifact, accepted
@@ -447,6 +799,7 @@ Each segment in `whisper_segments` contains:
 - SUS scoring (`evaluation/sus.py`) has no respondents yet — it's the scoring math only, per CLAUDE.md's "with actual respondents" still needing actual respondents
 - `POST /transcribe`'s whole-file path assumes the API and worker containers share a filesystem/volume (see `deployment/docker-compose.yml`'s `shared-tmp` volume) — object storage (S3-compatible) is the properly distributed fix, not yet built (no infra here to build it against)
 - Light concurrency testing done (round 8: 6 parallel WS sessions × 3 chunks against the real worker + Postgres, all clean, no lost updates) — but not sustained *load* testing (dozens of concurrent sessions, hours-long sessions, many workers). Measured single-worker streaming RTF ≈ 2.4–2.9 (Whisper `small` int8 CPU): the pipeline is slower than real-time, so a live session's transcript lags and finalizes minutes after "stop" unless `--concurrency`/worker count is scaled to the offered chunk rate. This is a model/hardware reality, not a bug — GPU or a fine-tuned smaller model is the real lever; `WHISPER_CPU_THREADS` gives ~17%.
+- **All Flutter↔backend traffic (login credentials, the JWT, and every raw audio chunk streamed over `/ws/transcribe`) is plain, unencrypted HTTP/WS** — `android/app/src/main/AndroidManifest.xml` sets `usesCleartextTraffic="true"`, necessary because the server has no TLS certificate (a local dev machine on the classroom Wi-Fi, addressed by LAN IP). Anyone else on the same Wi-Fi could sniff it. Acceptable for a thesis prototype on a trusted local network; genuinely not acceptable if this ever serves real classrooms over anything less trusted, or the backend moves off the local network — the fix (a TLS cert + `usesCleartextTraffic="false"`) needs real infra (a reachable hostname, a cert) this sandbox has no way to set up or verify. Not previously called out in either doc, found this pass.
 - Docker images themselves (not just CI's postgres/redis service containers) have never been built and run as actual containers — `deployment/docker-compose.yml` is written to spec and CI-adjacent-verified only
 
 **Resolved this pass** (were unbuilt, now built — see "Backend (Built)" below): SpeechBrain ECAPA teacher verification, FastAPI endpoints (POST + WebSocket), transcript persistence, glossary post-processing, TextRank + rule-based minutes, `evaluation/wer.py` + `evaluation/latency.py`.
@@ -481,7 +834,7 @@ Each segment in `whisper_segments` contains:
 - `materialize_transcript()`/`append_chunk_result()` redo O(n) work (a full copy + full re-walk from index 0) on every single chunk arrival, making total work and total DB bytes written O(n²) across a session — fine at the chunk counts this project's own testing has exercised, a real concern for a full lecture-length session (hundreds to ~1200 chunks/hour).
 - Teacher verification calls SpeechBrain once per Whisper segment with no batching (40-60 sequential CPU forward passes for a typical discussion) — real per-chunk overhead a busier deployment would feel, not a bug. (The old RNNoise 3-FFmpeg-subprocess-per-chunk cost is gone — `afftdn` is one subprocess, ~0.1s; see round 8.)
 - `evaluation/wer.py`'s edit distance allocates a full O(n·m) matrix (not a rolling buffer) even for character-level CER on a full session transcript, and `compute_error_rates_by_group()`'s "overall" figure re-runs the whole thing on the concatenated corpus instead of aggregating already-computed per-pair results. `evaluation/teacher_id.py`'s precision/recall/FAR/FRR render as `0.0` (not "undefined") when their denominator is zero. Both are evaluation-script-only (never on any production request path), lower urgency until real evaluation runs are actually happening at a scale where either matters.
-- Minor duplication noted, not refactored: `write_report()` is copy-pasted near-identically across all five `evaluation/*.py` scripts; `backend/utils/errors.py`'s `as_http_exception()` is unused dead code (every route hand-rolls the same mapping instead); `minutes.py`'s `_get_session_or_404` helper isn't reused by `sessions.py`/`teacher.py`'s equivalent inline checks. (`audio_service.py`'s `_run_ffmpeg_resample` was deleted in round 8 — the denoise round-trip that was its only caller is gone.)
+- Minor duplication noted, not refactored: `write_report()` is copy-pasted near-identically across all five `evaluation/*.py` scripts; `minutes.py`'s `_get_session_or_404` helper isn't reused by `sessions.py`/`teacher.py`'s equivalent inline checks. (`backend/utils/errors.py` — dead code — was deleted in round 9; `audio_service.py`'s `_run_ffmpeg_resample` in round 8.)
 - **`LICENSE` at the repo root is an empty directory, not a file** — a direct violation of this file's own "must be a root-level file, not a folder" rule. Not fixed: what license to actually apply is Nathan's call, not something to invent.
 
 **Resolved this pass, round 8** (a full-stack stress + integration + front-end/back-end audit against a REAL running API + REAL separate Celery worker + REAL Postgres + REAL Redis — not eager mode — plus the first real per-stage latency/RTF numbers; triggered by "stress test this, make it production-level"):
@@ -493,15 +846,42 @@ Each segment in `whisper_segments` contains:
 - **First real latency numbers** (dev machine, 8-core CPU, Whisper `small` int8, `recordings/lecture_preprocessed.wav` 5s clip): cold model load ~7.5s (Whisper 4.2s + SpeechBrain 2.9s + Silero 0.4s); warm per-stage on a 5s clip — preprocess ~0.26s, denoise (`afftdn`) ~0.1s, VAD ~0.3s, transcribe ~7–11s. **Streaming RTF ≈ 2.4–2.9** (a 3s chunk takes ~8.6s to process on one worker) — Whisper `small` int8 on CPU is simply slower than real-time; the async worker-pool split is what keeps this from blocking anything, and `--concurrency=N` / more worker containers is the throughput lever. Silero-load-once (round-5 fix) measured 2.8× on `detect_speech`. `WHISPER_CPU_THREADS` env knob added (set to physical core count → ~17% faster single-stream; leave 0 under a multi-worker pool).
 - **Teacher-ID functional check** (synthetic, NOT manuscript numbers — real numbers need labeled data): enrolled on a voice, same voice scored cosine 0.66–0.88 (>0.35 threshold → is_teacher), a pitch-shifted proxy 0.12, silence 0.06, white noise 0.04 — clean separation, threshold behaves sanely. End-to-end through the real worker: a verified session correctly labelled 3/3 segments.
 
+**Resolved this pass, round 9** (continued bug-hunt across the code paths round 8 didn't reach — diarization, keyword/glossary services, DB layer, the remaining Flutter screens):
+- **Diarization output parsing was wrong for the community-1 model** — `diarize_audio()` did `for turn, speaker in output.speaker_diarization`, but `pyannote/speaker-diarization-community-1`'s `Pipeline.__call__` returns a `DiarizeOutput` dataclass whose `.speaker_diarization` is a pyannote `Annotation`; iterating an Annotation yields `Segment` objects (2-tuples of floats), so `turn, speaker` unpacked to `(start_float, end_float)` and then `turn.start` blew up `AttributeError` on **every** real diarization run. Untested (needs the gated HF model — `enable_diarization` is off by default but the "Accurate" preset turns it on). **Fixed** to `output.speaker_diarization.itertracks(yield_label=True)` per pyannote's own `DiarizeOutput.serialize()`, and made robust to a bare `Annotation` (older 3.x) too.
+- **`resources.py` had the same Silero-reload bug round 5 fixed in `latency.py`** — it built `LoadedModels(...)` with no `silero_vad_model`, so `detect_speech()` reloaded Silero from scratch *inside* the monitored run, inflating the exact CPU/memory numbers the script measures. Fixed the same way (load once, pass in).
+- **`keyword_service`: PageRank could fail to finalize a session** — `nx.pagerank` raises `PowerIterationFailedConvergence` on a pathological co-occurrence graph (rare on natural text, but a session *must* still finalize). Now `max_iter=200` + a weighted-degree-centrality fallback.
+- **`glossary_service` hardening** — an empty/whitespace key in a hand-edited `glossary.json` compiled to `\b(?:...|)\b`, which matches the zero-width position at every word boundary → the replacement got spliced in all over every transcript. Now filtered out. Also catches `UnicodeDecodeError` on a non-UTF-8 `glossary.json` (the file is meant to be grown by hand from the corpus pass; a Windows editor saving it as ANSI would otherwise crash worker startup with a bare traceback).
+- **`db.py`: `pool_pre_ping=True`** — a Postgres connection idle past the server timeout (or dropped by a restart) now reconnects transparently instead of failing one request with a stale-connection `OperationalError`.
+- **WS handler held a Postgres connection "idle in transaction" for the whole recording** — `transcribe_stream`'s `db` session (kept open for the life of the WS connection by `Depends(get_db)`) does a couple of reads at connection start, then the stream loop runs for minutes with nothing touching `db`. The transaction those reads opened stayed open the entire time — pinning a pooled connection and holding back Postgres autovacuum, per active recording. Now `db.rollback()` right before the loop closes it; `finalize_and_close()` opens a fresh one when it needs to. Verified against the real stack: `pg_stat_activity` shows zero `idle in transaction` after a session (was one per session). The two scalars the loop closures need (`session_id`, `options`) are captured before the rollback.
+- **Flutter robustness**: `home` + `enrollment` delete handlers caught only `ApiException`, so a network error during a delete was an unhandled async error with zero user feedback — added the same generic catch the `_load` paths already have. Home-screen `_load()` after returning from the recording screen is now `mounted`-guarded (a 401 mid-recording force-logs-out and disposes the screen). `transcript_screen`'s search highlighter could `RangeError` if a query character changed length when lowercased (ß/İ/ligatures — near-impossible for HIL/FIL/ENG but a hard crash if hit) — now falls back to un-highlighted text in that case. `PcmChunker.flush()` drops a sub-VAD-frame trailing remainder instead of shipping a ~1ms "WAV" the server's FFmpeg rejects as empty (spurious "chunk error" at session end).
+- **CORS `allow_credentials`** flipped `True`→`False` in `main.py` — auth is a Bearer token, never a cookie, so credentialed CORS mode does nothing, and `allow_origins=["*"]` + `allow_credentials=True` is a combination browsers reject anyway. (Moot for the Flutter client — not a browser — but a latent misconfiguration for any browser caller.)
+- **Dead code deleted**: `backend/utils/errors.py` (`as_http_exception`, imported nowhere).
+
+**Resolved this pass, round 10** (the "scripts are frozen" rule was **lifted by the PM** — `scripts/` is maintained again; these were the broken bits, all now runnable end to end against `recordings/lecture_preprocessed.wav`):
+- **`process_pipeline.py --denoise` was broken** the same way the backend's was — `pyrnnoise` 0.4.3 raises in `audiolab`. Switched to FFmpeg `afftdn` (same `DENOISE_FILTER` string as `audio_service.py`); deleted `_run_ffmpeg_resample` + `RNNOISE_SAMPLE_RATE`.
+- **`process_pipeline.py` had no standardization step at all** — it went straight to transcription, so on `recordings/lecture_preprocessed.wav` (a short clip ending mid-word) Faster-Whisper hit a repetition-loop hallucination: 25 segments, `"...give a test of a test of a test..."`, timestamps running to 28s for a 5s file. Added an always-on `standardize_audio()` (FFmpeg 16kHz mono + loudnorm, mirrors `ingest_audio()`) — CLAUDE.md rule 1, which the script never actually followed. With it: 2 clean segments, correct text. `process_pipeline()` also now cleans its FFmpeg intermediates in a `finally`.
+- **`diarize_audio.py` had the same `output.speaker_diarization` unpacking bug** as `diarization_service.py` (round 9) — `for turn, speaker in ...` on a pyannote `Annotation` unpacks `Segment` float-tuples, then `turn.start` → `AttributeError` on every run. Fixed to `.itertracks(yield_label=True)`, robust to a bare `Annotation`.
+- **`simulate_streaming.py`** inherited both fixes via `process_pipeline`; its `--denoise` help text updated. `split_into_chunks()` now folds a trailing chunk of ≤`MIN_CHUNK_DURATION_SECONDS` into the previous one instead of writing it out — a ~1s tail chunk reliably triggered the Whisper repetition loop (observed: one spinning 77s and returning `""`). Verified: a 5s file at `--chunk-seconds 2` now yields 2 chunks (2s + 3s) with a coherent combined transcript, no stall.
+- `transcribe_audio.py` and `record_test_audio.py` were checked and work as-is (path-based Whisper decode via `av` 18 is fine; `sd.rec` mic capture unchanged).
+- `evaluation/latency.py` + `resources.py` `--denoise` help strings updated to "afftdn".
+
+**Resolved this pass, round 11** (continued bug-hunt; one real crash found and proven with a revert-and-confirm cycle, plus infra/doc cleanup):
+- **A failed swipe-delete crashed the session list on the next reload** — `SessionListTile`'s `Dismissible` animates itself out of the tree and calls `onDismissed` exactly once, before the async delete resolves. `HomeScreen._delete()` only removed the session from `_sessions` on a *successful* server delete, so after a failed one (network error, 500, or a race), the next rebuild of the list (pull-to-refresh, or returning from a new recording — both call `_load()`) recreated a `Dismissible` with the same key on the already-"dismissed" `State`, and Flutter throws: `"A dismissed Dismissible widget is still part of the tree."` Reproduced directly with a widget test (swipe → confirm → fail the DELETE call → pull to refresh), confirmed the fix resolves it, then confirmed reverting the fix makes the test fail again. Fixed: remove the item unconditionally, before the server call even resolves — a failed delete still shows its error snackbar and self-heals on the next `_load()`. New `android/test/home_screen_test.dart`.
+- **`ScaitaleApp`'s auth gate had zero test coverage** despite being the single most load-bearing piece of app-wide behavior (`MaterialApp(home: auth.isAuthenticated ? HomeScreen : LoginScreen)`, rebuilt on every `AuthController.notifyListeners()`). Added `android/test/app_auth_gate_test.dart` confirming both login and `forceLogout` actually swap the visible screen on this Flutter version (they do — this was a real doubt worth resolving empirically, not by reading Flutter's source and guessing).
+- **A double-tap on "New session" could push two `LiveRecordingScreen`s** before the route transition covered the FAB, both trying to grab the microphone. Guarded with the same in-flight-boolean idiom already used elsewhere in this app (`_isSubmitting`, `_isExporting`).
+- **CI's Redis URLs** switched to `127.0.0.1` (matching `config.py`'s round-8 default) for consistency, even though the Windows-specific `::1` stall this guards against likely doesn't reproduce on the Ubuntu runner.
+- Stale `pyrnnoise`/RNNoise mentions cleaned up in `requirements-api.txt`'s header comment and `Dockerfile.worker`'s comment (afftdn is a plain FFmpeg filter, not a Python package, in both places now). `.dockerignore` gained `*.docx` — the thesis manuscript must never end up in a Docker build context either, not just out of git.
+- **Newly documented, not fixed**: all Flutter↔backend traffic (login credentials, the JWT, every raw audio chunk over `/ws/transcribe`) is plaintext HTTP/WS — `AndroidManifest.xml` sets `usesCleartextTraffic="true"` because the dev server has no TLS cert. Acceptable on a trusted classroom Wi-Fi; a real gap if this backend ever serves anything less trusted. See "Known Open Issues".
+
 **Round 3 — production/market-deployment rearchitecture** (explicit scope change past CLAUDE.md's original "no production scaling" boundary, at the user's request after an architecture review): see "Production Architecture" below. This is a real rearchitecture, not additive — `backend/main.py` no longer loads any ML models, `POST /transcribe` is now async (202 + poll), and every route requires auth. The bullets right below this describe the CURRENT shape; treat mentions of "SQLite" or "synchronous" pipeline calls elsewhere in this file as historical unless a bullet here says otherwise.
 
 ---
 
 ## Backend (Built)
 
-Everything below lives in `backend/` and `evaluation/`, promoted from the six scripts per CLAUDE.md's rule (scripts themselves untouched).
+Everything below lives in `backend/` and `evaluation/`, promoted from the six scripts. (The scripts were frozen after promotion; that rule was lifted in round 10 — see "Six Built Scripts" above.)
 
-- **`backend/services/audio_service.py`** — the pipeline orchestrator, unchanged by the Round 3 rearchitecture (only *what calls it* changed — see "Production Architecture"). Adds one thing `process_pipeline.py` never actually did: FFmpeg preprocessing now runs unconditionally on every chunk/file (`ingest_audio()`), closing the gap between the locked "always on" rule and what the script actually executed. Denoise/VAD/diarization/teacher-verification stay independently toggleable. Per-stage latency recorded on every call.
+- **`backend/services/audio_service.py`** — the pipeline orchestrator, unchanged by the Round 3 rearchitecture (only *what calls it* changed — see "Production Architecture"). FFmpeg preprocessing runs unconditionally on every chunk/file (`ingest_audio()`), per the locked "always on" rule. Denoise (`afftdn`)/VAD/diarization/teacher-verification stay independently toggleable. Per-stage latency recorded on every call.
 - **`backend/services/teacher_verification_service.py`** — SpeechBrain ECAPA-TDNN (`spkrec-ecapa-voxceleb`), cosine similarity against enrolled embeddings, lazy-imported so a missing install degrades gracefully (disables `enable_teacher_verification`) instead of crashing the worker. Labels each segment `is_teacher`/`teacher_name`/`confidence` — the *identification* half of "teacher voice-prioritized"; `keyword_service.py`/`minutes_service.py` below are the *prioritization* half.
 - **`backend/services/glossary_service.py`** + **`backend/data/glossary.json`** — case-preserving glossary correction, applied per-chunk right after transcription.
 - **`backend/services/keyword_service.py`** — TextRank on `networkx` (no nltk/sumy), trilingual stopword list. `build_weighted_text()` repeats teacher-labeled segments in the token stream before extraction, so instructional speech dominates the keyword graph instead of getting diluted by side conversation — a no-op when `enable_teacher_verification` was off (no `is_teacher` labels to weight).
@@ -551,7 +931,7 @@ Lives at `android/` (repo root — see "Repo Structure" above; Flutter's own gen
 - **`lib/core/`** — `api_client.dart` (one method per `backend/api/*.py` endpoint, throws `ApiException`, global 401 → `AuthController.forceLogout()`), `ws_transcribe_client.dart` (drives `/ws/transcribe`'s start/chunk/end/session_ended protocol), `auth_controller.dart`, `settings_controller.dart` (server URL + `PipelineOptions`, persisted via `shared_preferences`), `secure_storage.dart` (JWT only, via `flutter_secure_storage`), `wav_encoder.dart` + `pcm_chunker.dart` (wrap `record` package's headerless PCM16 stream into self-contained WAV chunks per `chunk_duration_seconds` — required because the WS contract needs each binary frame to be a complete WAV file FFmpeg can parse, and `record`'s `startStream()` only emits headerless PCM), `local_vad.dart` (on-device energy-based VAD pre-filter, round 5 below — `PcmChunker` gates on it before a chunk ever reaches the WS), `polling.dart` (`pollUntil()`, exponential backoff, used for both whole-file-session and teacher-enrollment status polling).
 - **`lib/models/`** — `pipeline_config.dart` (`Preset.{fast,balanced,accurate}` → `PipelineOptions`, field names matching `backend/schemas/pipeline.py` exactly; `balanced` matches that schema's own defaults), plus `fromJson`/`toJson` models mirroring every other `backend/schemas/` file.
 - **`lib/screens/`** — `auth/` (login/register), `home/` (session library), `enrollment/` (teacher voice enrollment), `recording/` (live recording + subtitles), `transcript/` (search + highlight, client-side substring matching per the backend's "no search endpoint" contract), `minutes/` (structured minutes + export via `share_plus`), `settings/` (server URL, preset selector, advanced panel with outcome-framed labels never raw parameter names, logout).
-- **Tests** (`android/test/`, 57 passing) — pure-Dart unit tests for every piece of logic that doesn't need a device: `pipeline_config_test.dart` (preset values + exact `toJson()` key names — the single highest-risk typo surface in the app), `wav_encoder_test.dart` (RIFF/WAVE/fmt/data header correctness), `pcm_chunker_test.dart` (chunk sizing, remainder-carry, flush, VAD gating + hangover sequence), `local_vad_test.dart` (RMS correctness, threshold boundary, windowing catches a short burst a whole-buffer average would miss), model `fromJson` parsing against literal fixtures (including missing-optional-field cases), `ws_messages_test.dart`, `polling_test.dart`.
+- **Tests** (`android/test/`, 69 passing) — pure-Dart unit tests for every piece of logic that doesn't need a device: `pipeline_config_test.dart` (preset values + exact `toJson()` key names — the single highest-risk typo surface in the app), `wav_encoder_test.dart` (RIFF/WAVE/fmt/data header correctness), `pcm_chunker_test.dart` (chunk sizing, remainder-carry, flush, VAD gating + hangover sequence), `local_vad_test.dart` (RMS correctness, threshold boundary, windowing catches a short burst a whole-buffer average would miss), model `fromJson` parsing against literal fixtures (including missing-optional-field cases), `ws_messages_test.dart`, `polling_test.dart`, `api_client_test.dart` (round 8), plus two widget tests added while bug-hunting: `app_auth_gate_test.dart` (the app-wide auth gate had zero coverage) and `home_screen_test.dart` (a real crash — see "Resolved this pass, round 11" below).
 - **CI** — `.github/workflows/ci.yml` gained a second `flutter` job (`flutter pub get && flutter analyze && flutter test`), pinned to the exact Flutter version this was built against rather than floating `stable`.
 
 **Verified for real, on-device, this session** (not just unit tests): register → login (JWT persists across app restart, confirmed by killing and relaunching the app) → teacher voice enrollment (real mic recording via `record`, real multipart upload, real SpeechBrain embedding extraction via the Celery worker, real `pollUntil()` backoff visible in the request log, ends in a green "Ready" badge) → live recording (`WS /ws/transcribe`, real mic streaming, ~2 dozen chunks actually processed by the worker over several minutes without dropping the connection) → stop → session finalizes server-side (`status: "completed"`) → Transcript screen loads the real session. Settings screen's preset/slider values were confirmed to exactly reflect `PipelinePresets.balanced` (beam 5, chunk 3s) as rendered on-screen, not just in code.
@@ -564,13 +944,13 @@ Lives at `android/` (repo root — see "Repo Structure" above; Flutter's own gen
 - Tested on the Android **emulator**, not a physical device — real classroom deployment needs a phone on the same Wi-Fi as the backend, which the Settings screen's editable server-address field supports (`10.0.2.2` is emulator-only; a physical device needs the host's real LAN IP) but which hasn't itself been exercised.
 - The emulator's virtual microphone is silent, so no real classroom audio has been transcribed through the client yet. Both the server pipeline's VAD and the client's own `LocalVad` (added round 5, below) correctly treat this as "no speech" rather than hallucinating — but this also means an emulator run now sends far fewer chunks to the server than the pre-VAD build did (typically just the hangover-guaranteed first chunk of a session), a real wire-behavior change, not just an internal one. Transcription accuracy on real speech through the *client* (as opposed to through `scripts/`, already covered by backend tests) remains unverified.
 - "Import audio file" (`POST /transcribe`'s whole-file path) has no UI — deliberately descoped, not one of the six required screens; noted in `docs/future_ideas.md`.
-- Session list swipe-to-delete, the Minutes screen with real (non-empty) content, and transcript search/highlight against real multi-segment text were code-reviewed but not exercised on-device this session (no session with actual detected speech existed yet to view).
+- The Minutes screen with real (non-empty) content, and transcript search/highlight against real multi-segment text, were code-reviewed but not exercised on-device this session (no session with actual detected speech existed yet to view). Session list swipe-to-delete is the one exception: it was never exercised on-device either, but the bug-hunting pass gave it real automated coverage instead — `android/test/home_screen_test.dart` (round 11) drives the actual swipe/confirm/delete gesture in a widget test and caught a genuine crash (a failed delete poisoning the list on the next reload) no amount of on-device poking without deliberately failing the network call would have surfaced.
 
 ---
 
 ## Current Build Priority — superseded, see below
 
-The original 14-day sprint list (items 1–4, 8, 9, 11) is done — see "Backend (Built)" and the four "Resolved this pass" rounds above. **All backend/code work is done as of round 4. The Flutter client is now built too — see "Flutter Client (Built)" below.** Everything genuinely still open from here is either Nathan's own work or blocked on real-world data/people, not more code:
+The original 14-day sprint list (items 1–4, 8, 9, 11) is done — see "Backend (Built)" and the "Resolved this pass" rounds above (now eleven of them: round 4 closed the last real feature gaps against the thesis's specific objectives; rounds 5–11 are review/bug-hunt/hardening passes — real bugs found and fixed against a genuinely running stack, not new scope). The Flutter client is built too — see "Flutter Client (Built)" below. An operator's runbook (build/run/test/fine-tune/package/hybrid-deploy, all in one place) also exists as a published Claude artifact from this same line of work — regenerate or update it via the `artifact-design`/`artifact-diagramming` skills if asked for one and it isn't already linked in the conversation. Everything genuinely still open from here is either Nathan's own work or blocked on real-world data/people, not more code:
 
 - **Ethics/consent clearance** — Nathan's, blocks all real classroom recording.
 - **Real classroom data collection** (Nathan + Andrei + Dan Joseph) — blocks everything below.
@@ -583,3 +963,152 @@ The original 14-day sprint list (items 1–4, 8, 9, 11) is done — see "Backend
 ---
 
 *Last updated: September 2026. Maintained by Nathan (PM) + Claude (implementer).*
+
+---
+
+# PART 3 — CURRENT STATE + FINAL HANDOFF SUMMARY
+
+*(Added in the 2026-09-15 reverse-engineering pass, appended after the pre-existing record above
+rather than interleaved into it, so Part 2's own history stays untouched.)*
+
+## Explicit Status Report
+
+| Feature | Status | Evidence |
+|---|---|---|
+| Audio capture (Flutter, mic → WAV chunks) | **IMPLEMENTED** | `android/lib/core/pcm_chunker.dart`, `wav_encoder.dart`; verified end-to-end on emulator per Part 2's "Flutter Client (Built)" |
+| On-device VAD pre-filter (energy-based, not ML) | **IMPLEMENTED** | `android/lib/core/local_vad.dart`, 9 unit tests |
+| WebSocket streaming transcription | **IMPLEMENTED** | `backend/api/transcribe.py`, verified via 90/1 pytest pass this run + Part 2's real multi-chunk concurrency testing |
+| FFmpeg preprocessing (standardize + loudnorm) | **IMPLEMENTED**, always-on | `backend/services/audio_service.py: ingest_audio()` |
+| Noise suppression | **IMPLEMENTED** (FFmpeg `afftdn`), toggle off by default | Not RNNoise — see Part 2 round 8; threshold values unvalidated against real classroom audio |
+| Silero VAD (speech segmentation) | **IMPLEMENTED**, on by default | `detect_speech()` |
+| Multilingual transcription (Faster-Whisper small) | **IMPLEMENTED** | Core function of the app; no forced language, auto-detects per segment |
+| Hiligaynon fine-tuning (LoRA/PEFT adaptation) | **PLANNED / NOT IMPLEMENTED** — scaffold only | `ai/finetuning/` imports cleanly and is unit-tested, but has never been run against real data; `datasets/processed/` is empty |
+| Glossary-based code-switch correction | **IMPLEMENTED**, starter data only | `backend/data/glossary.json` is a hand-written example list, "not derived from real Whisper error logs yet" per its own `_meta` field |
+| Teacher voice enrollment + verification | **IMPLEMENTED** | SpeechBrain ECAPA-TDNN, cosine similarity; threshold (`0.35` default) is an **unvalidated heuristic**, not calibrated against real enrolled/unenrolled data |
+| Multi-speaker diarization | **IMPLEMENTED**, optional, off by default | `pyannote.audio`; needs `HF_TOKEN` + accepting the gated model's terms; untested this pass (no token configured in this environment) |
+| Keyword extraction (TextRank) | **IMPLEMENTED** | `backend/services/keyword_service.py`, from-scratch NetworkX PageRank |
+| Structured minutes generation | **IMPLEMENTED**, rule-based heuristic (explicitly NOT an NLP/LLM model) | `backend/services/minutes_service.py`; will misfire on real classroom audio in ways only real data will reveal |
+| Minutes export | **IMPLEMENTED**, Markdown/plain-text only | `backend/api/minutes.py`; **NOT** a `.docx`/Word document — a stale earlier conceptual-framework draft said `python-docx`; confirmed unused anywhere in the repo this pass |
+| Transcript export (as opposed to minutes) | **NOT IMPLEMENTED** | No `/sessions/{id}/export` route exists; only minutes has an export endpoint |
+| Authentication (register/login, JWT) | **IMPLEMENTED** | `backend/core/security.py`, `backend/api/auth.py` |
+| Per-role access (Teacher/Student/Admin) | **NOT IMPLEMENTED** | Single undifferentiated `User` role; explicitly listed as future work in `docs/future_ideas.md` |
+| Postgres + Alembic migration path | **IMPLEMENTED**, verified previously against a real native Postgres install (see Part 2 round 3) | SQLite remains the zero-config default |
+| Celery worker split (API never blocks on ML) | **IMPLEMENTED**, verified this pass | `import backend.main` pulls in zero ML libraries — confirmed directly this run |
+| Docker images (`Dockerfile.api`/`Dockerfile.worker`) | **WRITTEN, NEVER ACTUALLY BUILT** — no Docker installed in any environment this project has been developed in so far | CI's own Postgres/Redis *service containers* are real Docker usage; the app's own two Dockerfiles are unbuilt |
+| GPU/CUDA acceleration | **NOT IMPLEMENTED** | Installed `torch` build is CPU-only (`2.13.0+cpu`); zero GPU-related code anywhere in `backend/`; confirmed by direct execution this pass |
+| Physical-device (non-emulator) testing | **NOT DONE** | Documented gap in Part 2; the `uvicorn --host 0.0.0.0` requirement for this is documented but unexercised |
+| Real classroom-audio evaluation (WER/CER, teacher-ID accuracy) | **NOT DONE** — tooling exists, zero real results | `evaluation/wer.py`, `evaluation/teacher_id.py` are built and unit-tested, but have never been run against real labeled classroom data |
+| Usability study (SUS) | **NOT DONE** — scoring math only, no respondents, and the combined SUS-plus-custom-items instrument described in some conceptual-framework drafts does not exist in code | `evaluation/sus.py` implements only the rigid standard 10-item SUS scale |
+| App icon / custom branding | **NOT IMPLEMENTED** — default Flutter template icon and `pubspec.yaml` description still in place | `android/pubspec.yaml`, `android/android/app/src/main/res/mipmap-*` |
+| Release-signed Android build | **NOT IMPLEMENTED** — release builds currently sign with the auto-generated debug keystore | `android/android/app/build.gradle.kts` has a literal `// TODO: Add your own signing config` |
+| TLS / HTTPS | **NOT IMPLEMENTED** — deliberate, for a local-network prototype | `usesCleartextTraffic="true"` in `AndroidManifest.xml`; acceptable on a trusted classroom Wi-Fi, not beyond it |
+
+## If You Only Read One Section
+
+**1. What this project is.** Scaitale: a Flutter Android app + Python backend that records
+classroom audio, transcribes it in code-switched Hiligaynon/Filipino/English, identifies teacher
+speech via a voice-verification model, and generates structured "minutes" (topics, key points,
+definitions, action items) — a thesis prototype, not a shipped product.
+
+**2. How the architecture works.** Flutter records and streams WAV chunks over a WebSocket to a
+FastAPI "API tier" that does no ML itself — it hands every chunk off to a Celery "worker tier"
+(a separate process) that runs FFmpeg → Silero VAD → Faster-Whisper → glossary correction →
+(optional) pyannote diarization → SpeechBrain teacher verification, then reports results back
+through a pub/sub channel the API tier relays to the phone. At session end, the API tier itself
+(not the worker) generates keywords + minutes, since that step is cheap pure-Python work. See
+Part 1B above and `docs/ARCHITECTURE.md` for the full diagram and every data-flow workflow traced
+step by step.
+
+**3. How to start the backend.** From the repo root, with the venv active and `FFmpeg` on PATH:
+`$env:JWT_SECRET_KEY = (python -c "import secrets; print(secrets.token_hex(32))")` then
+`uvicorn backend.main:app --reload`. That's the whole "fastest path" — no Postgres, no Redis
+required (SQLite + Celery eager-mode cover it). Full detail, including the real multi-process
+path, in `docs/SETUP.md`.
+
+**4. How to start Flutter.** From `android/`: `flutter pub get` then `flutter run` (with a device/
+emulator already selected — `flutter devices` to check). Open the app's Settings screen and confirm
+the server address — `10.0.2.2:8000` for an emulator, the host machine's real LAN IP for a physical
+device, and the backend **must** be started with `--host 0.0.0.0` for a physical device to reach it
+at all (the default `--reload`-only invocation binds to loopback and silently refuses a physical
+phone). Full detail in `docs/SETUP.md`.
+
+**5. Where the important code is.** Backend logic: `backend/services/audio_service.py` (the
+pipeline orchestrator) and `backend/worker/tasks.py` (what actually calls it). Flutter logic:
+`android/lib/screens/recording/live_recording_screen.dart` (recording + streaming) and
+`android/lib/core/` (the networking/audio-encoding plumbing everything else depends on).
+
+**6. Where the ML pipeline is.** Entirely inside `backend/services/audio_service.py`'s
+`run_pipeline()` function, which calls out to `diarization_service.py` and
+`teacher_verification_service.py`. Models are loaded exactly once per worker process, in
+`backend/worker/celery_app.py`'s `_load_models()` — never reloaded per request. Full model-by-model
+detail (source, purpose, I/O shape, config knobs) in `docs/ML_PIPELINE.md`.
+
+**7. What files must not be changed casually.** The WebSocket message shapes (`type: "start"/
+"chunk_result"/"error"/"session_ended"` — `backend/api/transcribe.py` + `android/lib/models/
+ws_messages.dart` must stay in sync), the `PipelineOptions` field names (`backend/schemas/
+pipeline.py` ↔ `android/lib/models/pipeline_config.dart`'s `toJson()`), the `/api/v1` route
+prefix, and any `SUPPORTED_EXTENSIONS`/environment-variable name a script or the Flutter client
+hardcodes. Full contract list with "what breaks if you change this" in `docs/ARCHITECTURE.md`
+§Contracts and `docs/DEVELOPMENT.md` §What Must Not Change.
+
+**8. What is currently broken/incomplete.** Nothing is *broken* in the sense of failing its own
+tests — both suites pass clean on this machine, right now (90/1 backend, 69/69 + clean analyze on
+Flutter). What's genuinely incomplete: no fine-tuned Hiligaynon model exists yet (scaffold only, no
+corpus), no real classroom audio has ever been run through the system (all thresholds/heuristics
+are unvalidated defaults), no physical-device test has been performed, no Docker image has actually
+been built, GPU acceleration isn't wired up despite the dev machine having a usable GPU, and the
+Android release build is signed with a debug key. See the Status Report table above for the full,
+honest breakdown.
+
+**9. What should be worked on next.** In dependency order: (a) get real classroom audio recorded
+and run through the system — almost everything else (fine-tuning, real WER/teacher-ID numbers, the
+usability study) is blocked on this; (b) a physical-device smoke test using the documented
+`--host 0.0.0.0` + firewall-rule steps in `docs/SETUP.md`; (c) everything else is genuinely
+optional/non-blocking for a thesis prototype (Docker builds, GPU wiring, release signing, a real
+license file).
+
+**10. The exact first 10 commands a new developer should run**, from a machine with Python 3.11,
+Flutter 3.47.2, FFmpeg, and Git already installed (see `docs/SETUP.md` if any of those aren't yet
+installed):
+
+```powershell
+cd academic-discussion-assistant
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+$env:JWT_SECRET_KEY = (python -c "import secrets; print(secrets.token_hex(32))")
+pytest tests/ -v
+uvicorn backend.main:app --reload
+# --- in a second terminal ---
+cd academic-discussion-assistant\android
+flutter pub get
+flutter test
+```
+
+## Panic Mode — "If Claude disappears right now"
+
+1. Everything you need is in this repository's files, not in any chat history — that was the
+   entire point of this pass. Start with this file (`CLAUDE.md`), then `docs/SETUP.md` to get a
+   backend and the Flutter app running, then `docs/ARCHITECTURE.md` to understand how they talk to
+   each other.
+2. To confirm the backend still works at all: `pytest tests/ -v` from the repo root (venv active,
+   `JWT_SECRET_KEY` set) — expect `90 passed, 1 skipped`. To confirm Flutter still works:
+   `flutter analyze && flutter test` from `android/` — expect clean analyze + `69` passing.
+3. Secrets you must personally recreate (nothing below is recoverable from the repository itself —
+   see `docs/SETUP.md` §Environment Variables for the full list): `JWT_SECRET_KEY` (generate fresh,
+   any value works for local dev), `HF_TOKEN` (only if you want diarization — create one at
+   huggingface.co and accept `pyannote/speaker-diarization-community-1`'s terms), a Postgres
+   password (only if you move off the SQLite default).
+4. If something in this documentation set turns out to be wrong or stale, trust the code over the
+   docs, then fix the docs — that discipline is what keeps this whole set trustworthy for the next
+   person (or the next AI) who reads it cold.
+
+---
+*Part 3 added 2026-09-15, alongside `docs/ARCHITECTURE.md`, `docs/BACKEND.md`, `docs/FRONTEND.md`,
+`docs/ML_PIPELINE.md`, `docs/SETUP.md`, `docs/API.md`, `docs/TROUBLESHOOTING.md`,
+`docs/DEVELOPMENT.md`, `docs/PROJECT_INVENTORY.md`, `docs/CHANGE_HISTORY.md`, and
+`docs/COLD_START_VERIFICATION.md`. `docs/ARCHITECTURE_DECISIONS.md` (the rationale behind every
+significant technical decision — what was chosen, what alternatives existed, why, and what's
+honestly unrecorded) and `docs/FINAL_HANDOFF.md` (20 blunt, brutally factual questions answered —
+what's actually done, what's dangerous to touch, what breaks, what to do with 30 minutes vs. one
+day vs. one week) were both added 2026-09-17, as the last two documents in this set.*

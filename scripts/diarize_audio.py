@@ -58,7 +58,18 @@ def diarize_audio(pipeline: Pipeline, audio_path: Path, num_speakers: int | None
     except Exception as error:
         raise RuntimeError(f"Diarization failed on '{audio_path.name}': {error}")
 
-    return [(turn.start, turn.end, speaker) for turn, speaker in output.speaker_diarization]
+    # community-1's Pipeline.__call__ returns a DiarizeOutput dataclass whose
+    # `.speaker_diarization` is a pyannote Annotation; older 3.x pipelines
+    # return a bare Annotation. Iterate with itertracks(yield_label=True) ->
+    # (segment, track, label), matching pyannote's own DiarizeOutput.serialize().
+    # `for turn, speaker in output.speaker_diarization` used to unpack each
+    # Segment (a 2-tuple of floats) into (turn, speaker), then `turn.start`
+    # raised AttributeError on every real run.
+    annotation = getattr(output, "speaker_diarization", output)
+    return [
+        (turn.start, turn.end, speaker)
+        for turn, _track, speaker in annotation.itertracks(yield_label=True)
+    ]
 
 
 def format_speaker_segments(raw_segments: list[tuple]) -> list[dict]:

@@ -3,12 +3,12 @@ The pipeline orchestrator — the backend-service promotion of
 scripts/process_pipeline.py (CLAUDE.md build-priority item #1), plus
 the pieces that script didn't have:
 
-  - FFmpeg preprocessing is now actually always-on end-to-end. CLAUDE.md
-    locks this as a rule ("FFmpeg preprocessing is ALWAYS ON — never
-    toggleable"), but process_pipeline.py never called it — preprocessing
-    only happened as a separate manual CLI step before that script ran.
-    ingest_audio() below closes that gap: every chunk/file, denoise-toggle
-    or not, gets FFmpeg-normalized first.
+  - FFmpeg preprocessing is always-on end-to-end via ingest_audio():
+    every chunk/file, denoise-toggle or not, gets FFmpeg-normalized
+    first, per CLAUDE.md's locked rule ("FFmpeg preprocessing is ALWAYS
+    ON — never toggleable"). (scripts/process_pipeline.py originally
+    skipped this; it now does its own standardize_audio() step too — see
+    round 10.)
   - Glossary refinement, right after transcription (per-chunk).
   - Teacher verification, right after diarization.
   - Per-stage latency timing on every call, for evaluation/latency.py.

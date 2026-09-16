@@ -29,11 +29,16 @@ DEFAULT_CHUNK_DURATION_SECONDS = 3.0
 
 def split_into_chunks(input_path: Path, chunk_duration_seconds: float = DEFAULT_CHUNK_DURATION_SECONDS) -> list[Path]:
     """
-    Splits a preprocessed WAV file into sequential chunk WAVs (final
-    chunk kept even if shorter). Bounded to 1-10s: below that, Whisper
-    has too little context per chunk; above it, the latency benefit of
-    chunking at all starts to disappear. Writes each chunk to its own
-    file since process_pipeline() expects a path — the same handoff
+    Splits a WAV file into sequential chunk WAVs. The final chunk is kept
+    even if shorter than chunk_duration_seconds, UNLESS it would be at or
+    under MIN_CHUNK_DURATION_SECONDS, in which case its samples are folded
+    into the previous chunk instead of written as their own file:
+    Faster-Whisper's repetition-loop hallucination is far more likely on a
+    ~1s clip (observed: a 1s tail spinning for 70+ seconds and returning
+    nothing), and this split exists for latency measurement. Bounded to
+    1-10s: below that, Whisper has too little context per chunk; above it,
+    the latency benefit of chunking disappears. Writes each chunk to its
+    own file since process_pipeline() expects a path — the same handoff
     shape a real chunk-upload endpoint will use.
     """
     if not input_path.exists():
@@ -47,15 +52,19 @@ def split_into_chunks(input_path: Path, chunk_duration_seconds: float = DEFAULT_
 
     audio_data, sample_rate = sf.read(input_path, dtype="int16")
     samples_per_chunk = int(chunk_duration_seconds * sample_rate)
+    total_samples = len(audio_data)
+
+    starts = list(range(0, total_samples, samples_per_chunk))
+    min_final_samples = int(MIN_CHUNK_DURATION_SECONDS * sample_rate)
+    if len(starts) > 1 and total_samples - starts[-1] <= min_final_samples:
+        starts.pop()  # the previous chunk now extends to end-of-file
 
     chunk_dir = input_path.parent / f"{input_path.stem}_chunks"
     chunk_dir.mkdir(parents=True, exist_ok=True)
 
     chunk_paths = []
-    total_samples = len(audio_data)
-
-    for chunk_index, start_sample in enumerate(range(0, total_samples, samples_per_chunk)):
-        end_sample = min(start_sample + samples_per_chunk, total_samples)
+    for chunk_index, start_sample in enumerate(starts):
+        end_sample = starts[chunk_index + 1] if chunk_index + 1 < len(starts) else total_samples
         chunk_audio = audio_data[start_sample:end_sample]
 
         chunk_path = chunk_dir / f"chunk_{chunk_index:04d}.wav"
@@ -147,13 +156,13 @@ def simulate_streaming(
 def main() -> None:
     """CLI entry point for manual testing only."""
     parser = argparse.ArgumentParser(description="Simulate chunked streaming transcription.")
-    parser.add_argument("audio_file", type=str, help="Path to a preprocessed 16kHz mono WAV file.")
+    parser.add_argument("audio_file", type=str, help="Path to a 16kHz mono WAV file (split_into_chunks reads it with soundfile).")
     parser.add_argument(
         "--chunk-seconds", type=float, default=DEFAULT_CHUNK_DURATION_SECONDS,
         help=f"Chunk duration in seconds, {MIN_CHUNK_DURATION_SECONDS}-{MAX_CHUNK_DURATION_SECONDS} "
              f"(default: {DEFAULT_CHUNK_DURATION_SECONDS})."
     )
-    parser.add_argument("--denoise", action="store_true", help="Enable RNNoise denoising per chunk.")
+    parser.add_argument("--denoise", action="store_true", help="Enable FFmpeg afftdn denoising per chunk.")
     parser.add_argument("--no-vad", action="store_true", help="Skip Silero VAD per chunk.")
     parser.add_argument("--diarize", action="store_true", help="Enable per-chunk diarization (see caveat in process_chunk's docstring).")
     parser.add_argument("--hf-token", type=str, default=None, help="Hugging Face token, required only with --diarize (or set HF_TOKEN env var).")

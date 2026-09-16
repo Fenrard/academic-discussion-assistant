@@ -173,6 +173,11 @@ class _TeacherEnrollmentScreenState extends State<TeacherEnrollmentScreen> {
     } on ApiException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not delete: ${e.message}')));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Could not delete — can't reach the server.")),
+      );
     }
   }
 
