@@ -18,9 +18,41 @@
 > **PROJECT_INVENTORY.md**, **CHANGE_HISTORY.md**, **COLD_START_VERIFICATION.md**,
 > **ARCHITECTURE_DECISIONS.md** (the *why* behind every significant technical choice in this
 > codebase — read it before proposing to replace a library or rearchitect a stage; it also names,
-> honestly, which decisions have no recorded reasoning at all), and **FINAL_HANDOFF.md** (the
+> honestly, which decisions have no recorded reasoning at all), **FINAL_HANDOFF.md** (the
 > single terse, no-fluff distillation of everything else — 20 blunt questions answered, meant to be
-> read first in a genuine emergency, before any of the longer docs). If you are a new developer or a
+> read first in a genuine emergency, before any of the longer docs),
+> **CODEBASE_DEPENDENCY_MAP.md** (the actual, `grep`-verified import graph — who imports what, who
+> calls what, which changes ripple where, confirmed-absent circular imports, and every duplicated/
+> orphaned/dead/never-executed module named explicitly), and **API_CONTRACT.md** (every HTTP/
+> WebSocket endpoint, request/response/error shape, the complete WS message lifecycle with real
+> example payloads, and the specific, confirmed frontend/backend discrepancies already found — a
+> WS field the client silently drops, an endpoint the app never actually calls, and a schema class
+> that documents a contract without enforcing it). **ML_REPRODUCIBILITY.md** documents every model
+> this system actually uses — exact Hugging Face repo IDs (one directly observed via a live log,
+> not assumed from a name), where each one's weights physically live on disk (checked byte-for-byte
+> this pass, including discovering that the local `models/` folder's SpeechBrain files are symlinks
+> into the Hugging Face cache, not real copies), and answers precisely what must be obtained on a
+> fresh clone (short answer: nothing manually — everything downloads itself except Silero VAD,
+> which needs nothing at all). **GIT_HISTORY.md** traces the project's actual git archaeology —
+> initial architecture, every major rearchitecture, the full three-stage RNNoise→pyrnnoise→afftdn
+> denoiser saga with exact diffs, the one file ever deleted in this repo's history, zero renames
+> ever detected, and which now-removed code is still recoverable via `git show <hash>^:<path>` if
+> you ever need to compare against or revert to it. **MODIFICATION_COOKBOOK.md** is the
+> beginner-oriented howto: exact files/classes/functions/tests for 26 common changes (Flutter UI,
+> recording behavior, VAD, denoising, teacher verification, ASR params, the database, auth, GPU
+> config, adding an endpoint, debugging either side, and more) — start there for "how do I change
+> X," start with this Part 1 for "how does the system work." **SETUP_AUTOMATION.md** documents the
+> `scripts/check_environment.ps1`/`setup_backend.ps1`/`setup_frontend.ps1` trio (what each
+> automates safely vs. deliberately refuses to, e.g. never installing system-level software) and
+> the root `.env.example`. **DEPENDENCY_LOCK.md** is the dependency-reproducibility audit — every
+> backend/frontend package's exact installed version, what's pinned vs. floating in
+> `requirements*.txt`/Docker/CI, PyTorch/CUDA status, the Android toolchain chain, and the specific
+> minimal pins that would lock today's working environment in place without upgrading anything.
+> **CONTEXT_GAP_REPORT.md** names what almost never made it into any of the docs above — most
+> notably a real editing pass to the thesis manuscript that exists only in an untracked, undiffable
+> `.docx` file, and two factual errors this Part 1 itself still contains about that file (a stale
+> filename, and a false git-tracking claim) — read it if something in this handoff doesn't match
+> what you find on disk. If you are a new developer or a
 > new AI assistant picking this project up cold with zero prior context, read **this Part 1 in full**,
 > then jump into whichever companion doc matches your task — the "Safe Modification Guide" in
 > `docs/DEVELOPMENT.md` tells you exactly which file to open for a given change.
@@ -1111,4 +1143,56 @@ flutter test
 significant technical decision — what was chosen, what alternatives existed, why, and what's
 honestly unrecorded) and `docs/FINAL_HANDOFF.md` (20 blunt, brutally factual questions answered —
 what's actually done, what's dangerous to touch, what breaks, what to do with 30 minutes vs. one
-day vs. one week) were both added 2026-09-17, as the last two documents in this set.*
+day vs. one week) were both added 2026-09-17. `docs/CODEBASE_DEPENDENCY_MAP.md` (the verified
+file/class/function import-and-call graph, critical dependency chains, and a confirmed-clean
+circular-import check), `docs/API_CONTRACT.md` (every endpoint, the full WebSocket message
+lifecycle, and confirmed frontend/backend discrepancies found by reading both sides field-for-
+field), and `docs/ML_REPRODUCIBILITY.md` (every model's exact identifier and real on-disk
+location, verified against this machine's actual model cache, plus a direct answer to what a
+fresh machine needs to obtain) were all added 2026-09-18, as static-analysis companions to this
+file's own narrative
+description of the architecture. `docs/GIT_HISTORY.md` (the full commit-by-commit archaeology —
+initial architecture, every major rearchitecture, the three-stage RNNoise→pyrnnoise→afftdn
+denoiser history with exact diffs, the single file ever deleted in this repo, zero renames ever
+detected, and which now-gone code is still recoverable via git) and `docs/MODIFICATION_COOKBOOK.md`
+(exact files/classes/functions/tests for 26 common modification tasks, written for a developer new
+to this codebase) were added 2026-09-19. `docs/SETUP_AUTOMATION.md`, `scripts/check_environment.ps1`,
+`scripts/setup_backend.ps1`, `scripts/setup_frontend.ps1`, and root-level `.env.example` were also
+added 2026-09-19 — a from-scratch reproducibility pass that automates exactly the project-level
+setup that's safe to automate (venv, pip/pub deps, a starter `.env`, runtime directories) and
+explicitly refuses to automate system-level installs (Python/FFmpeg/Flutter/Postgres/Redis/CUDA
+themselves, or `android/android/local.properties`'s machine-specific SDK path) — see
+`docs/SETUP_AUTOMATION.md` for the full safe-vs-not-safe reasoning and exactly what each script
+does. `check_environment.ps1` was actually run against this dev machine this pass (not just
+written) and caught one real PowerShell 5.1 bug in the process: `ffmpeg`/`ffprobe --version` write
+to stderr, which — confirmed directly — becomes a terminating error under
+`$ErrorActionPreference = 'Stop'` even through `2>$null`, not just the `2>&1` case most PowerShell
+guidance warns about; fixed by locally relaxing the error preference around that one native call.
+A second real bug surfaced the same way, by actually reading the `.env` the script produced
+rather than assuming success: `Get-Content -Raw` with no explicit `-Encoding UTF8` misread
+`.env.example`'s em dashes as the system codepage, corrupting them into mojibake in the generated
+`.env` — fixed by specifying UTF-8 explicitly on both the read and the write. `docs/
+DEPENDENCY_LOCK.md` (added 2026-09-19, a full reproducibility audit — every backend/frontend
+dependency's exact installed version, min/max where declared, PyTorch/CUDA status confirmed
+CPU-only, the Android toolchain chain, and a live `pip freeze` that caught five packages installed
+in this dev `.venv` but declared in no requirements file at all — `pyrnnoise`, `audiolab`,
+`passlib`, `python-docx`, `python-dotenv`, all confirmed-unused leftovers, harmless but real drift
+between this `.venv` and a fresh install) closes out this pass — read it before assuming a fresh
+`pip install -r requirements.txt` reproduces this exact environment; it explains precisely why it
+currently wouldn't, and the minimal, non-upgrading pins that would fix that.
+
+`docs/CONTEXT_GAP_REPORT.md` (added 2026-09-19) audits what earlier work in this project's history
+knew that never made it into any repository file — most of this project's knowledge now does live
+in these docs, but that report names the specific exceptions: an ~18-edit line-level pass to the
+thesis manuscript's Chapters 1 and 3 that exists only in the (untracked, undiffable) `.docx` files
+themselves; the Pseudocode-Scripts-1/2/5/6/7 and GUI/Figure-4–10 manuscript-fact-check conclusions,
+never merged into `docs/paper-vs-implementation.md`; and, found while verifying the manuscript
+claim, **two real errors in this very file** worth flagging here rather than silently
+self-correcting: the Directory Map (and "What This Project Is," further below) both still name a
+stale `THESIS_...(4).docx` filename that no longer exists on disk (the real files are
+`THESIS [FINAL]_...(1).docx` and a dated backup), and the Directory Map's claim that the manuscript
+"is already tracked" in git is false — confirmed directly, `git log --all --full-history -- *.docx`
+returns nothing; no thesis document has ever been committed here — with its own
+"see docs/DEVELOPMENT.md for the standing rule" cross-reference pointing at a file that contains no
+mention of the manuscript at all. Left uncorrected here deliberately (identifying the gap was the
+task; fixing `CLAUDE.md` again was not) — see the report for the exact fix.
