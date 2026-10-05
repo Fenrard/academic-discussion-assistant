@@ -19,6 +19,12 @@ from backend.core.config import settings
 
 class Glossary:
     def __init__(self, terms: dict[str, str]):
+        # Drop empty/whitespace-only keys before anything else: an empty key
+        # escapes to an empty regex alternative, and `\b(?:)\b` matches the
+        # zero-width position at every word boundary — sub() would then splice
+        # the replacement in all over the text. A stray "" in a hand-edited
+        # glossary.json is absurd but shouldn't be able to corrupt every transcript.
+        terms = {key: value for key, value in terms.items() if key and key.strip()}
         # Longest phrase first, so multi-word entries match before any
         # single-word entry inside them would.
         ordered_keys = sorted(terms.keys(), key=len, reverse=True)
@@ -59,5 +65,11 @@ def load_glossary(glossary_path: Path | None = None) -> Glossary:
         data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         raise RuntimeError(f"Malformed glossary file at '{path}': {error}")
+    except UnicodeDecodeError as error:
+        # The glossary is meant to be grown by hand from the corpus pass;
+        # a Windows editor saving it as ANSI/cp1252 with a Hiligaynon
+        # character would otherwise crash worker startup with a bare
+        # UnicodeDecodeError (it's a ValueError, not a JSONDecodeError).
+        raise RuntimeError(f"Glossary file at '{path}' is not valid UTF-8 — re-save it as UTF-8. ({error})")
 
     return Glossary(data.get("terms", {}))

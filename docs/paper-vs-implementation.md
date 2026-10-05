@@ -214,6 +214,8 @@ the -50 default because classroom ambient sits above near-silence; `tn=1`
 tracks non-stationary noise) — an unvalidated starting point, same caveat
 as `teacher_verification_threshold`, to tune against real noisy classroom
 recordings once they exist. Covered by `tests/test_audio_denoise.py`.
+`scripts/process_pipeline.py` + `simulate_streaming.py` use the same
+`afftdn` filter string (round 10 — the scripts-are-frozen rule was lifted).
 
 **Paper wording:** change the Software Stack paragraph to "noise
 suppression via FFmpeg's `afftdn` (FFT denoise) filter" — this is closer

@@ -95,7 +95,7 @@ def write_report(report: dict) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Measure CPU/memory usage of a full pipeline run on this machine.")
     parser.add_argument("audio_file", type=str, help="Path to a preprocessed 16kHz mono WAV file.")
-    parser.add_argument("--denoise", action="store_true", help="Enable RNNoise denoising.")
+    parser.add_argument("--denoise", action="store_true", help="Enable FFmpeg afftdn denoising.")
     parser.add_argument("--no-vad", action="store_true", help="Skip Silero VAD.")
     args = parser.parse_args()
 
@@ -107,11 +107,24 @@ def main() -> None:
     from backend.services.glossary_service import load_glossary
 
     audio_path = Path(args.audio_file).resolve()
+    enable_vad = not args.no_vad
 
     try:
-        models = LoadedModels(whisper_model=load_whisper_model(), glossary=load_glossary())
+        # Load Silero once, up front, and pass it in — otherwise detect_speech()'s
+        # `silero_vad_model or load_silero_vad()` fallback reloads the model from
+        # scratch *inside* the monitored run, inflating exactly the CPU/memory
+        # numbers this script exists to measure (same fix as evaluation/latency.py).
+        silero_vad_model = None
+        if enable_vad:
+            from silero_vad import load_silero_vad
+
+            silero_vad_model = load_silero_vad()
+
+        models = LoadedModels(
+            whisper_model=load_whisper_model(), glossary=load_glossary(), silero_vad_model=silero_vad_model
+        )
         report = monitor_resources(
-            run_pipeline, audio_path, models, enable_denoise=args.denoise, enable_vad=not args.no_vad
+            run_pipeline, audio_path, models, enable_denoise=args.denoise, enable_vad=enable_vad
         )
     except (FileNotFoundError, ValueError, RuntimeError) as error:
         print(f"Error: {error}")

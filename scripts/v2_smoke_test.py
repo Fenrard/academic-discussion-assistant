@@ -12,12 +12,18 @@ sandbox has no way to run.
 import asyncio
 import json
 import time
+from pathlib import Path
 
 import requests
 import websockets
 
 BASE_URL = "http://127.0.0.1:8000/api/v1"
 WS_URL = "ws://127.0.0.1:8000/api/v1/ws/transcribe"
+# __file__-relative, not CWD-relative (unlike the "../recordings/..." literal this replaced) --
+# works regardless of whether this script is launched from scripts/ or the repo root. Reproduced
+# directly: the old literal raised FileNotFoundError when run as `python scripts/v2_smoke_test.py`
+# from the repo root, since ".." then resolved to the repo root's own parent, not scripts/'s parent.
+AUDIO_FILE = Path(__file__).resolve().parent.parent / "recordings" / "lecture_preprocessed.wav"
 
 
 def poll_session(token: str, session_id: str, timeout_seconds: float = 60.0) -> dict:
@@ -60,7 +66,7 @@ def main() -> None:
     assert r.status_code == 200
 
     print("== POST /transcribe (async, poll) ==")
-    with open("../recordings/lecture_preprocessed.wav", "rb") as audio_file:
+    with open(AUDIO_FILE, "rb") as audio_file:
         r = requests.post(
             f"{BASE_URL}/transcribe",
             headers=headers,
@@ -82,7 +88,7 @@ def main() -> None:
     assert r.status_code == 200
 
     print("== teacher enrollment (async, poll) ==")
-    with open("../recordings/lecture_preprocessed.wav", "rb") as audio_file:
+    with open(AUDIO_FILE, "rb") as audio_file:
         r = requests.post(
             f"{BASE_URL}/teachers/enroll",
             headers=headers,
@@ -124,7 +130,7 @@ async def ws_smoke_test(token: str) -> None:
         print("session_started:", started)
         assert started["type"] == "session_started"
 
-        with open("../recordings/lecture_preprocessed.wav", "rb") as audio_file:
+        with open(AUDIO_FILE, "rb") as audio_file:
             await ws.send(audio_file.read())
 
         result = json.loads(await ws.recv())

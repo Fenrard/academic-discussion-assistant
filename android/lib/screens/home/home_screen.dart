@@ -25,6 +25,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = true;
   String? _error;
   List<SessionSummary> _sessions = const [];
+  bool _isOpeningRecorder = false;
 
   @override
   void initState() {
@@ -60,13 +61,29 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _delete(SessionSummary session) async {
+    // Optimistic, unconditional removal — SessionListTile's Dismissible has
+    // already animated itself away and calls this exactly once. If the item
+    // were left in `_sessions` after a failed delete, the *next* rebuild of
+    // this list (pull-to-refresh, or returning from a new recording, both of
+    // which call _load()) would recreate a Dismissible with the same key on
+    // an already-"dismissed" State, and Flutter throws ("A dismissed
+    // Dismissible widget is still part of the tree.") — reproduced directly
+    // via a widget test that swiped, failed the delete, then reloaded.
+    // Removing it here regardless of outcome avoids that; a failed delete is
+    // surfaced via the snackbar below and self-heals on the next _load() (the
+    // session reappears from the server as a fresh widget/key, not a reused
+    // poisoned one).
+    setState(() => _sessions = _sessions.where((s) => s.id != session.id).toList());
     try {
       await context.read<ApiClient>().deleteSession(session.id);
-      if (!mounted) return;
-      setState(() => _sessions = _sessions.where((s) => s.id != session.id).toList());
     } on ApiException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not delete session: ${e.message}')));
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Could not delete session — can't reach the server.")),
+      );
     }
   }
 
@@ -95,10 +112,20 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: _buildBody(),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () async {
-          await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const LiveRecordingScreen()));
-          _load();
-        },
+        // Guarded against a double-tap pushing two LiveRecordingScreens at
+        // once (the push transition doesn't itself prevent a second tap
+        // landing before it covers the FAB) -- two screens both grabbing the
+        // microphone would be a confusing way to lose a recording, not just
+        // a cosmetic double-navigation.
+        onPressed: _isOpeningRecorder
+            ? null
+            : () async {
+                setState(() => _isOpeningRecorder = true);
+                await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const LiveRecordingScreen()));
+                if (!mounted) return; // a 401 during recording can force-logout and dispose this screen mid-await
+                setState(() => _isOpeningRecorder = false);
+                _load();
+              },
         icon: const Icon(Icons.mic),
         label: const Text('New session'),
       ),

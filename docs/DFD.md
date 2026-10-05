@@ -140,10 +140,10 @@ flowchart TD
 
 ### Process 3.0, unpacked (still one Level-1 bubble — this is what a Level 2 diagram would open up)
 
-FFmpeg normalize+loudnorm (always on) → optional RNNoise denoise → optional
-Silero VAD → Faster-Whisper transcription → glossary correction → optional
-pyannote diarization → optional SpeechBrain teacher verification. Locked
-order, independent toggles — see CLAUDE.md's "Pipeline Order (Locked)".
+FFmpeg normalize+loudnorm (always on) → optional FFmpeg `afftdn` denoise →
+optional Silero VAD → Faster-Whisper transcription → glossary correction →
+optional pyannote diarization → optional SpeechBrain teacher verification.
+Locked order, independent toggles — see CLAUDE.md's "Pipeline Order (Locked)".
 
 ### What D5 (temp audio) deliberately does NOT do
 

@@ -1,7 +1,8 @@
 # Scaitale worker tier — the Celery worker that actually runs the pipeline
-# (RNNoise -> Silero VAD -> Faster-Whisper -> pyannote -> SpeechBrain). Needs ffmpeg
-# (CLAUDE.md: "FFmpeg preprocessing is ALWAYS ON") and the full ML stack — this is the
-# heavy image; deployment/Dockerfile.api stays lean by NOT installing any of this.
+# (FFmpeg afftdn denoise -> Silero VAD -> Faster-Whisper -> pyannote -> SpeechBrain).
+# Needs ffmpeg (CLAUDE.md: "FFmpeg preprocessing is ALWAYS ON" — also what afftdn runs
+# through, no separate Python package) and the full ML stack — this is the heavy image;
+# deployment/Dockerfile.api stays lean by NOT installing any of this.
 #
 # Build from the repo root: docker build -f deployment/Dockerfile.worker -t scaitale-worker .
 

@@ -85,6 +85,16 @@ void main() {
       expect(flushed!.wav.length, 44 + 1200);
       expect(chunker.flush(), isNull); // buffer was cleared by the first flush
     });
+
+    test('drops a sub-VAD-frame remainder instead of shipping a ~1ms WAV', () {
+      // A stop landing a few bytes past a chunk boundary shouldn't produce a
+      // frame the server's FFmpeg step rejects as empty (-> spurious "chunk
+      // error" at session end). 200 bytes = 100 samples < one 30ms VAD frame.
+      final chunker = PcmChunker(chunkDuration: const Duration(milliseconds: 100));
+      chunker.add(bytesOf(200));
+      expect(chunker.flush(), isNull);
+      expect(chunker.flush(), isNull); // and the buffer was still cleared
+    });
   });
 
   group('PcmChunker VAD gating', () {

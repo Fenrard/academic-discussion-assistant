@@ -119,11 +119,25 @@ async def transcribe_stream(websocket: WebSocket, db: DbSession = Depends(get_db
     if session is None:
         return  # _handle_start_message already sent an error and closed
 
+    session_id = session.id
+    options = PipelineOptions(**session.pipeline_options)
+
     enrolled_teachers = (
         session_service.get_enrolled_embeddings(db, current_user.id)
-        if PipelineOptions(**session.pipeline_options).enable_teacher_verification
+        if options.enable_teacher_verification
         else []
     )
+
+    # Close the transaction the reads above opened before entering the stream
+    # loop: that loop runs for the whole recording (minutes), and this `db`
+    # session — held open for the life of the WS connection by Depends(get_db)
+    # — would otherwise sit "idle in transaction" the entire time, pinning a
+    # pooled Postgres connection and holding back VACUUM. Nothing reads `db`
+    # during the loop (the worker tier persists chunks on its own sessions);
+    # finalize_and_close() opens a fresh transaction when it needs one. The two
+    # scalars the loop closures still need are captured above, before rollback
+    # expires `session`.
+    db.rollback()
 
     # Shared, cooperatively-checked state between the two loops below — see
     # backend/core/pubsub.py's docstring for why this is a poll loop, not an
@@ -141,7 +155,7 @@ async def transcribe_stream(websocket: WebSocket, db: DbSession = Depends(get_db
         # SQLAlchemy's identity map would happily hand back the stale object from before any
         # chunk committed, and finalize would run on an empty transcript.
         db.expire_all()
-        fresh_session = session_service.get_session(db, current_user.id, session.id)
+        fresh_session = session_service.get_session(db, current_user.id, session_id)
         finalized_session = session_service.finalize_session(db, fresh_session)
         await websocket.send_json({
             "type": "session_ended",
@@ -153,7 +167,6 @@ async def transcribe_stream(websocket: WebSocket, db: DbSession = Depends(get_db
         await websocket.close()
 
     async def receive_chunks():
-        options = PipelineOptions(**session.pipeline_options)
         while True:
             message = await websocket.receive()
 
@@ -166,7 +179,7 @@ async def transcribe_stream(websocket: WebSocket, db: DbSession = Depends(get_db
                 state["enqueued"] += 1
                 audio_b64 = base64.b64encode(message["bytes"]).decode("ascii")
                 transcribe_chunk_task.delay(
-                    session.id, chunk_index, audio_b64, options.model_dump(), enrolled_teachers
+                    session_id, chunk_index, audio_b64, options.model_dump(), enrolled_teachers
                 )
 
             elif "text" in message and message["text"] is not None:
@@ -186,7 +199,7 @@ async def transcribe_stream(websocket: WebSocket, db: DbSession = Depends(get_db
                     })
 
     async def listen_results():
-        async with subscribe(f"session:{session.id}:results") as results:
+        async with subscribe(f"session:{session_id}:results") as results:
             while True:
                 message = await results.get(timeout=_RESULT_POLL_INTERVAL_SECONDS)
                 if message is not None:

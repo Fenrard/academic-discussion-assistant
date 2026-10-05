@@ -20,3 +20,4 @@ tests/
 *.log
 .env
 .claude/
+*.docx
